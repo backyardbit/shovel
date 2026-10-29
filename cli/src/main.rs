@@ -1,7 +1,9 @@
+mod github;
 mod host;
 mod keys;
 mod machine;
 mod paths;
+mod record;
 mod vnc;
 
 use anyhow::{bail, Context, Result};
@@ -166,6 +168,24 @@ enum Cmd {
         #[arg(long, default_value_t = 3600)]
         timeout: u64,
     },
+    #[command(about = "Record the VM screen to MP4 + GIF (agent clicks are highlighted)")]
+    Record {
+        #[command(subcommand)]
+        command: RecordCmd,
+    },
+    #[command(about = "Upload files (recordings, screenshots) and post them as a comment on a GitHub PR")]
+    PrAttach {
+        #[arg(required = true)]
+        files: Vec<PathBuf>,
+        #[arg(long, help = "PR number or URL")]
+        pr: String,
+        #[arg(long, help = "owner/name [default: repo of the current directory]")]
+        repo: Option<String>,
+        #[arg(short, long, help = "Comment text shown above the media")]
+        message: Option<String>,
+        #[arg(long, help = "Print the comment without uploading")]
+        dry_run: bool,
+    },
     #[command(about = "Control the Shovel host app")]
     Host {
         #[command(subcommand)]
@@ -208,6 +228,32 @@ enum ImageCmd {
     Ls,
     #[command(about = "Delete an image")]
     Rm { name: String },
+}
+
+#[derive(Subcommand)]
+enum RecordCmd {
+    #[command(about = "Start recording in the background")]
+    Start {
+        name: String,
+        #[arg(short, long, help = "Output .mp4 path (a .gif is written next to it)")]
+        output: Option<PathBuf>,
+        #[arg(long, default_value_t = 10)]
+        fps: u32,
+        #[arg(long, default_value_t = 600, help = "Stop automatically after this many seconds")]
+        max_seconds: u64,
+    },
+    #[command(about = "Stop recording and print the MP4 and GIF paths")]
+    Stop { name: String },
+    #[command(hide = true)]
+    Worker {
+        name: String,
+        #[arg(long)]
+        output: PathBuf,
+        #[arg(long)]
+        fps: u32,
+        #[arg(long)]
+        max_seconds: u64,
+    },
 }
 
 #[derive(Subcommand)]
@@ -347,6 +393,7 @@ fn run(cli: Cli) -> Result<()> {
             } else {
                 vnc::BUTTON_LEFT
             };
+            record::note(&target, if right { "right" } else { "click" }, x, y);
             vnc.click(x, y, button, if double { 2 } else { 1 })?;
             vnc.finish()?;
             emit(json, json!({"ok": true}), String::new);
@@ -355,6 +402,7 @@ fn run(cli: Cli) -> Result<()> {
         Cmd::Move { name, x, y, force } => {
             let target = Target::resolve(&name)?;
             let mut vnc = connect_vnc(&target, force)?;
+            record::note(&target, "move", x, y);
             vnc.pointer(0, x, y)?;
             vnc.finish()?;
             emit(json, json!({"ok": true}), String::new);
@@ -363,7 +411,9 @@ fn run(cli: Cli) -> Result<()> {
         Cmd::Drag { name, x1, y1, x2, y2, force } => {
             let target = Target::resolve(&name)?;
             let mut vnc = connect_vnc(&target, force)?;
+            record::note(&target, "click", x1, y1);
             vnc.drag((x1, y1), (x2, y2))?;
+            record::note(&target, "click", x2, y2);
             vnc.finish()?;
             emit(json, json!({"ok": true}), String::new);
             Ok(())
@@ -371,6 +421,7 @@ fn run(cli: Cli) -> Result<()> {
         Cmd::Scroll { name, x, y, dx, dy, force } => {
             let target = Target::resolve(&name)?;
             let mut vnc = connect_vnc(&target, force)?;
+            record::note(&target, "move", x, y);
             vnc.scroll(x, y, dx, dy)?;
             vnc.finish()?;
             emit(json, json!({"ok": true}), String::new);
@@ -423,6 +474,45 @@ fn run(cli: Cli) -> Result<()> {
                 std::thread::sleep(Duration::from_secs(1));
             }
             emit(json, json!({"ok": true, "controller": "agent"}), || "agent has control".into());
+            Ok(())
+        }
+        Cmd::Record { command } => match command {
+            RecordCmd::Start { name, output, fps, max_seconds } => {
+                let target = Target::resolve(&name)?;
+                let state = record::start(&target, output, fps, max_seconds)?;
+                emit(json, json!({"ok": true, "recording": true, "mp4": state["mp4"], "gif": state["gif"]}), || {
+                    format!("Recording {name}. Stop with `shovel record stop {name}`.")
+                });
+                Ok(())
+            }
+            RecordCmd::Stop { name } => {
+                let target = Target::resolve(&name)?;
+                let mut result = record::stop(&target)?;
+                result["ok"] = json!(true);
+                emit(json, result.clone(), || {
+                    format!(
+                        "{}\n{}\n({:.1}s)",
+                        result["mp4"].as_str().unwrap_or(""),
+                        result["gif"].as_str().unwrap_or(""),
+                        result["seconds"].as_f64().unwrap_or(0.0)
+                    )
+                });
+                Ok(())
+            }
+            RecordCmd::Worker { name, output, fps, max_seconds } => {
+                let target = Target::resolve(&name)?;
+                record::worker(&target, &output, fps, max_seconds)
+            }
+        },
+        Cmd::PrAttach { files, pr, repo, message, dry_run } => {
+            let result = github::attach(&files, &pr, repo, message, dry_run)?;
+            emit(json, result.clone(), || {
+                if dry_run {
+                    result["body"].as_str().unwrap_or("").to_string()
+                } else {
+                    result["comment"].as_str().unwrap_or("").to_string()
+                }
+            });
             Ok(())
         }
         Cmd::Host { command } => match command {
@@ -859,10 +949,9 @@ fn image(json: bool, command: ImageCmd) -> Result<()> {
             emit(json, json!({"ok": true, "image": name}), || {
                 format!(
                     "The image is booting in a Shovel window. One-time setup:\n\
-                     \n  1. Go through Setup Assistant. Create an admin account named '{user}' (same as your Mac,\n     so paths like ~/workspace match). Skip Apple Account sign-in.\n\
+                     \n  1. Go through Setup Assistant. Create an admin account named '{user}' (same as your Mac,\n     so paths like ~/workspace match). Skip Apple Account sign-in and FileVault.\n\
                      \n  2. Open Terminal in the VM and run:\n       bash \"/Volumes/My Shared Files/shovel/setup.sh\"\n\
-                     \n  3. System Settings > Users & Groups > Automatically log in as '{user}'.\n\
-                     \n  4. Shut down the VM (Apple menu > Shut Down) or run `shovel image stop {name}`.\n\
+                     \n  3. Run `shovel image stop {name}`.\n\
                      \nAfter that, `shovel up <vm-name>` clones this image in seconds.",
                     user = spec.user
                 )

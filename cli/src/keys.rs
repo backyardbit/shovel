@@ -4,8 +4,8 @@ use crate::vnc::{pause, Vnc};
 
 const SHIFT: u32 = 0xffe1;
 const CONTROL: u32 = 0xffe3;
-const OPTION: u32 = 0xffe9;
-const COMMAND: u32 = 0xffeb;
+const OPTION: u32 = 0xffe7;
+const COMMAND: u32 = 0xffe9;
 
 fn modifier(name: &str) -> Option<u32> {
     match name {

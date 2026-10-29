@@ -131,7 +131,13 @@ pub fn ensure_guest_files() -> Result<()> {
     let guest = paths::guest();
     std::fs::create_dir_all(&guest)?;
     std::fs::copy(key.with_extension("pub"), guest.join("authorized_keys"))?;
-    let script = SETUP_SCRIPT.replace("__WORKSPACE__", &default_workspace().to_string_lossy());
+    let timezone = std::fs::read_link("/etc/localtime")
+        .ok()
+        .and_then(|p| p.to_string_lossy().split("zoneinfo/").nth(1).map(String::from))
+        .unwrap_or_else(|| "UTC".into());
+    let script = SETUP_SCRIPT
+        .replace("__WORKSPACE__", &default_workspace().to_string_lossy())
+        .replace("__TIMEZONE__", &timezone);
     std::fs::write(guest.join("setup.sh"), script)?;
     Ok(())
 }
@@ -140,6 +146,11 @@ const SETUP_SCRIPT: &str = r#"#!/bin/bash
 set -u
 SHARE="/Volumes/My Shared Files"
 WORKSPACE="__WORKSPACE__"
+TIMEZONE="__TIMEZONE__"
+
+read -r -s -p "Password for $USER (used for sudo and automatic login): " PASSWORD
+echo
+echo "$PASSWORD" | sudo -S -v 2>/dev/null || { echo "wrong password"; exit 1; }
 
 echo "==> Installing Shovel SSH key"
 mkdir -p ~/.ssh && chmod 700 ~/.ssh
@@ -147,17 +158,27 @@ touch ~/.ssh/authorized_keys
 grep -qxF "$(cat "$SHARE/shovel/authorized_keys")" ~/.ssh/authorized_keys || cat "$SHARE/shovel/authorized_keys" >> ~/.ssh/authorized_keys
 chmod 600 ~/.ssh/authorized_keys
 
-echo "==> Enabling passwordless sudo for $USER (you will be asked for your password once)"
+echo "==> Enabling passwordless sudo"
 echo "$USER ALL=(ALL) NOPASSWD: ALL" | sudo tee /etc/sudoers.d/shovel >/dev/null
 sudo chmod 440 /etc/sudoers.d/shovel
 
 echo "==> Enabling Remote Login (SSH)"
-sudo systemsetup -setremotelogin on 2>/dev/null || sudo launchctl enable system/com.openssh.sshd 2>/dev/null
+sudo systemsetup -setremotelogin on >/dev/null 2>&1 || sudo launchctl enable system/com.openssh.sshd 2>/dev/null
 sudo launchctl bootstrap system /System/Library/LaunchDaemons/ssh.plist 2>/dev/null || true
 
-echo "==> Disabling sleep, screensaver and screen lock"
+echo "==> Enabling automatic login"
+sudo defaults write /Library/Preferences/com.apple.loginwindow autoLoginUser "$USER"
+perl -e 'my @k=(0x7D,0x89,0x52,0x23,0xD2,0xBC,0xDD,0xEA,0xA3,0xB9,0x1F); my @p=unpack("C*",shift); my $n=@p; my $len=$n % 12 ? $n+12-($n % 12) : $n+12; push @p,(0) x ($len-$n); print pack("C*", map { $p[$_] ^ $k[$_ % 11] } 0..$#p);' "$PASSWORD" | sudo tee /etc/kcpassword >/dev/null
+sudo chmod 600 /etc/kcpassword
+
+echo "==> Disabling sleep, screensaver, auto-updates and window restore"
 sudo pmset -a sleep 0 displaysleep 0 disksleep 0 >/dev/null
 defaults -currentHost write com.apple.screensaver idleTime -int 0
+defaults write -g NSQuitAlwaysKeepsWindows -bool false
+sudo defaults write /Library/Preferences/com.apple.SoftwareUpdate AutomaticDownload -bool false
+sudo defaults write /Library/Preferences/com.apple.SoftwareUpdate AutomaticallyInstallMacOSUpdates -bool false
+sudo defaults write /Library/Preferences/com.apple.commerce AutoUpdate -bool false
+sudo systemsetup -settimezone "$TIMEZONE" >/dev/null 2>&1 || true
 
 echo "==> Linking $WORKSPACE to the shared workspace"
 sudo mkdir -p "$(dirname "$WORKSPACE")"
@@ -168,11 +189,16 @@ else
   sudo chown -h "$USER" "$WORKSPACE"
 fi
 
+echo "==> Installing Xcode Command Line Tools (git, clang)"
+if ! xcode-select -p >/dev/null 2>&1; then
+  touch /tmp/.com.apple.dt.CommandLineTools.installondemand.in-progress
+  LABEL=$(softwareupdate -l 2>/dev/null | grep -E "\* Label: Command Line Tools" | tail -1 | sed "s/^.*Label: //")
+  [ -n "$LABEL" ] && sudo softwareupdate -i "$LABEL"
+  rm -f /tmp/.com.apple.dt.CommandLineTools.installondemand.in-progress
+fi
+
 echo
-echo "Done. Remaining manual steps:"
-echo "  1. System Settings > Users & Groups > Automatically log in as: $USER"
-echo "  2. If 'Remote Login' is not on, turn it on in System Settings > General > Sharing"
-echo "  3. Shut the VM down (Apple menu > Shut Down), or run 'shovel image stop <name>' on the host"
+echo "Done. Shut the VM down (Apple menu > Shut Down) or run 'shovel image stop <name>' on the host."
 "#;
 
 fn normalize_mac(mac: &str) -> String {

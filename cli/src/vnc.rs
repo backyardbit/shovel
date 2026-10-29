@@ -130,82 +130,101 @@ impl Vnc {
         Ok(())
     }
 
-    fn request_full(&mut self) -> Result<()> {
-        let mut msg = vec![3u8, 0, 0, 0, 0, 0];
+    pub fn request(&mut self, incremental: bool) -> Result<()> {
+        let mut msg = vec![3u8, incremental as u8, 0, 0, 0, 0];
         msg.extend_from_slice(&self.width.to_be_bytes());
         msg.extend_from_slice(&self.height.to_be_bytes());
         self.stream.write_all(&msg)?;
         Ok(())
     }
 
-    pub fn capture(&mut self) -> Result<(u32, u32, Vec<u8>)> {
-        let mut rgb = vec![0u8; self.width as usize * self.height as usize * 3];
-        let mut covered = 0usize;
-        self.request_full()?;
-        loop {
-            match self.read_u8()? {
-                0 => {
-                    self.skip(1)?;
-                    let rects = self.read_u16()?;
-                    for _ in 0..rects {
-                        let x = self.read_u16()? as usize;
-                        let y = self.read_u16()? as usize;
-                        let w = self.read_u16()? as usize;
-                        let h = self.read_u16()? as usize;
-                        let encoding = self.read_u32()? as i32;
-                        match encoding {
-                            0 => {
-                                let mut raw = vec![0u8; w * h * 4];
-                                self.stream.read_exact(&mut raw)?;
-                                let fw = self.width as usize;
-                                let fh = self.height as usize;
-                                for row in 0..h {
-                                    let ty = y + row;
-                                    if ty >= fh {
-                                        break;
-                                    }
-                                    for col in 0..w {
-                                        let tx = x + col;
-                                        if tx >= fw {
-                                            break;
-                                        }
-                                        let src = (row * w + col) * 4;
-                                        let dst = (ty * fw + tx) * 3;
-                                        rgb[dst] = raw[src + 2];
-                                        rgb[dst + 1] = raw[src + 1];
-                                        rgb[dst + 2] = raw[src];
-                                    }
+    pub fn blank_frame(&self) -> Vec<u8> {
+        vec![0u8; self.width as usize * self.height as usize * 4]
+    }
+
+    pub fn read_update(&mut self, bgrx: &mut Vec<u8>) -> Result<Option<usize>> {
+        match self.read_u8()? {
+            0 => {
+                self.skip(1)?;
+                let rects = self.read_u16()?;
+                let mut covered = 0usize;
+                for _ in 0..rects {
+                    let x = self.read_u16()? as usize;
+                    let y = self.read_u16()? as usize;
+                    let w = self.read_u16()? as usize;
+                    let h = self.read_u16()? as usize;
+                    let encoding = self.read_u32()? as i32;
+                    match encoding {
+                        0 => {
+                            let mut raw = vec![0u8; w * h * 4];
+                            self.stream.read_exact(&mut raw)?;
+                            let fw = self.width as usize;
+                            let fh = self.height as usize;
+                            for row in 0..h {
+                                let ty = y + row;
+                                if ty >= fh {
+                                    break;
                                 }
-                                covered += w * h;
+                                let cols = w.min(fw.saturating_sub(x));
+                                let src = row * w * 4;
+                                let dst = (ty * fw + x) * 4;
+                                bgrx[dst..dst + cols * 4].copy_from_slice(&raw[src..src + cols * 4]);
                             }
-                            -223 => {
-                                self.width = w as u16;
-                                self.height = h as u16;
-                                rgb = vec![0u8; w * h * 3];
-                                covered = 0;
-                                self.request_full()?;
-                            }
-                            other => bail!("VNC server sent unsupported encoding {other}"),
+                            covered += w * h;
                         }
+                        -223 => {
+                            self.width = w as u16;
+                            self.height = h as u16;
+                            *bgrx = self.blank_frame();
+                            return Ok(Some(0));
+                        }
+                        other => bail!("VNC server sent unsupported encoding {other}"),
                     }
-                    if covered >= self.width as usize * self.height as usize {
-                        return Ok((self.width as u32, self.height as u32, rgb));
-                    }
                 }
-                1 => {
-                    self.skip(3)?;
-                    let n = self.read_u16()? as usize;
-                    self.skip(n * 6)?;
+                Ok(Some(covered))
+            }
+            1 => {
+                self.skip(3)?;
+                let n = self.read_u16()? as usize;
+                self.skip(n * 6)?;
+                Ok(None)
+            }
+            2 => Ok(None),
+            3 => {
+                self.skip(3)?;
+                let n = self.read_u32()? as usize;
+                self.skip(n)?;
+                Ok(None)
+            }
+            other => bail!("unexpected VNC message type {other}"),
+        }
+    }
+
+    pub fn capture_bgrx(&mut self) -> Result<Vec<u8>> {
+        let mut frame = self.blank_frame();
+        let mut covered = 0usize;
+        self.request(false)?;
+        loop {
+            if let Some(n) = self.read_update(&mut frame)? {
+                if n == 0 && covered == 0 && frame.iter().all(|b| *b == 0) {
+                    self.request(false)?;
+                    continue;
                 }
-                2 => {}
-                3 => {
-                    self.skip(3)?;
-                    let n = self.read_u32()? as usize;
-                    self.skip(n)?;
+                covered += n;
+                if covered >= self.width as usize * self.height as usize {
+                    return Ok(frame);
                 }
-                other => bail!("unexpected VNC message type {other}"),
             }
         }
+    }
+
+    pub fn capture(&mut self) -> Result<(u32, u32, Vec<u8>)> {
+        let frame = self.capture_bgrx()?;
+        let mut rgb = Vec::with_capacity(frame.len() / 4 * 3);
+        for px in frame.chunks_exact(4) {
+            rgb.extend_from_slice(&[px[2], px[1], px[0]]);
+        }
+        Ok((self.width as u32, self.height as u32, rgb))
     }
 
     pub fn screenshot(&mut self, path: &Path) -> Result<(u32, u32)> {

@@ -24,7 +24,7 @@ shovel image setup           # boots it in a window; follow the printed checklis
 shovel image stop
 ```
 
-The checklist: create an admin account with **your Mac username**, run `bash "/Volumes/My Shared Files/shovel/setup.sh"` in the guest Terminal (installs the SSH key, passwordless sudo, Remote Login, no sleep, `~/workspace` link), enable automatic login, shut down.
+The checklist: create an admin account with **your Mac username** (skip Apple Account and FileVault), then run `bash "/Volumes/My Shared Files/shovel/setup.sh"` in the guest Terminal. It installs the SSH key, passwordless sudo, Remote Login, automatic login, Xcode Command Line Tools, your time zone, and the `~/workspace` link, and turns off sleep and auto-updates.
 
 ## Use
 
@@ -40,6 +40,17 @@ shovel view t1                        # live window; "Take Over" pauses agent in
 shovel takeover t1 / shovel release t1
 shovel down t1 --rm
 ```
+
+## Recording demos for PRs
+
+```sh
+shovel record start t1                # background recorder; agent clicks are highlighted
+shovel click t1 400 300 ...           # drive the feature
+shovel record stop t1                 # prints .mp4 and .gif paths
+shovel pr-attach demo.gif demo.mp4 --pr 42 -m "New onboarding flow"
+```
+
+Encoding uses AVFoundation inside Shovel.app (no ffmpeg). GitHub has no API for PR comment attachments, so `pr-attach` commits the files to an orphan `shovel-media` branch via `gh` and posts a comment embedding the GIF and linking the MP4.
 
 Workspace modes for `up`: `--share-mode clone` (default, private CoW snapshot), `rw` / `ro` (live mount of the host directory), `none`. Use `--share <dir>` to expose a different directory.
 
