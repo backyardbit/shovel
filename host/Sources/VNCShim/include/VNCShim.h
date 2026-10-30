@@ -12,4 +12,6 @@ NS_ASSUME_NONNULL_BEGIN
 - (NSInteger)port;
 @end
 
+BOOL SHSendScrollWheel(VZVirtualMachine *vm, NSInteger dx, NSInteger dy);
+
 NS_ASSUME_NONNULL_END

@@ -120,15 +120,15 @@ impl Server {
             "tools/list" => json!({"tools": tools()}),
             "tools/call" => {
                 let name = params["name"].as_str().unwrap_or("");
-                if !tools().iter().any(|t| t["name"] == name) {
+                let Some(tool) = tools().into_iter().find(|t| t["name"] == name) else {
                     return Some(error(id, -32602, &format!("Unknown tool: {name}")));
-                }
+                };
                 let args = match &params["arguments"] {
                     Value::Object(_) => params["arguments"].clone(),
                     _ => json!({}),
                 };
                 let started = Instant::now();
-                let outcome = self.call(name, &args);
+                let outcome = check_arguments(&tool, &args).and_then(|_| self.call(name, &args));
                 eprintln!("shovel mcp: {name} {}ms", started.elapsed().as_millis());
                 match outcome {
                     Ok(content) => json!({"content": content, "isError": false}),
@@ -156,13 +156,32 @@ impl Server {
             "scroll" => self.scroll(args),
             "type" => {
                 let input = string(args, "text")?.context("\"text\" is required")?;
-                let (_, mut vnc) = self.input(args)?;
-                keys::type_text(&mut vnc, &input)?;
+                let (target, mut vnc) = self.input(args)?;
+                let mut runs: Vec<(bool, String)> = Vec::new();
+                for c in input.chars() {
+                    match runs.last_mut() {
+                        Some((ascii, run)) if *ascii == c.is_ascii() => run.push(c),
+                        _ => runs.push((c.is_ascii(), c.to_string())),
+                    }
+                }
+                let mut pasted = false;
+                for (ascii, chunk) in &runs {
+                    if *ascii {
+                        keys::type_text(&mut vnc, chunk)?;
+                        continue;
+                    }
+                    let (code, _, stderr) = run(&target.id, "LC_ALL=en_US.UTF-8 pbcopy", 15, Some(chunk.as_bytes()))?;
+                    if code != 0 {
+                        bail!("could not put non-ASCII text on the VM clipboard: {}", String::from_utf8_lossy(&stderr).trim());
+                    }
+                    keys::press(&mut vnc, "cmd+v")?;
+                    vnc::pause(200);
+                    pasted = true;
+                }
                 vnc.finish()?;
                 let mut out = format!("Typed {} characters.", input.chars().count());
-                let skipped = input.chars().filter(|c| !c.is_ascii()).count();
-                if skipped > 0 {
-                    out.push_str(&format!(" {skipped} non-ASCII characters were probably not typed; to enter them, run exec with \"printf '<text>' | pbcopy\" and then press cmd+v."));
+                if pasted {
+                    out.push_str(" Non-ASCII parts were pasted with cmd+v through the VM clipboard, which now holds the last of them.");
                 }
                 Ok(vec![text(out)])
             }
@@ -226,7 +245,7 @@ impl Server {
                 let command = string(args, "command")?.context("\"command\" is required")?;
                 let timeout = int(args, "timeout_seconds", 1, 600, 50)?;
                 let target = self.target(args)?;
-                let (code, stdout, stderr) = run(&target.id, &command, timeout)?;
+                let (code, stdout, stderr) = run(&target.id, &command, timeout, None)?;
                 let mut out = format!("exit code: {code}");
                 for (label, stream) in [("stdout", stdout), ("stderr", stderr)] {
                     if !stream.is_empty() {
@@ -239,7 +258,7 @@ impl Server {
                 let app = string(args, "app")?.context("\"app\" is required")?;
                 let target = self.target(args)?;
                 let flag = if is_bundle_id(&app) { "-b" } else { "-a" };
-                let (code, _, stderr) = run(&target.id, &format!("open {flag} {}", machine::shell_quote(&app)), 30)?;
+                let (code, _, stderr) = run(&target.id, &format!("open {flag} {}", machine::shell_quote(&app)), 30, None)?;
                 if code != 0 {
                     bail!("could not open {app}: {}", String::from_utf8_lossy(&stderr).trim());
                 }
@@ -354,6 +373,16 @@ impl Server {
         }
     }
 
+    fn not_held(&mut self, vm: &str) -> Result<()> {
+        if !self.is_held(vm) {
+            return Ok(());
+        }
+        if host::status(vm)?["controller"] == "human" {
+            return Err(self.human(vm));
+        }
+        bail!(HELD)
+    }
+
     fn is_held(&self, vm: &str) -> bool {
         self.held.as_ref().is_some_and(|(v, _)| v == vm)
     }
@@ -421,9 +450,7 @@ impl Server {
         let (x, y) = coord(args, "coordinate")?.context("\"coordinate\" is required: [x, y]")?;
         let modifiers = keys::parse_modifiers(&string(args, "modifiers")?.unwrap_or_default())?;
         let name = self.vm_name(args, "vm")?;
-        if self.is_held(&name) {
-            bail!(HELD);
-        }
+        self.not_held(&name)?;
         let (target, mut vnc) = self.input(args)?;
         let geo = self.geo(&vnc);
         geo.check(x, y)?;
@@ -476,9 +503,7 @@ impl Server {
         let (x, y) = coord(args, "coordinate")?.context("\"coordinate\" is required: [x, y] (the end point)")?;
         let start = coord(args, "start_coordinate")?;
         let name = self.vm_name(args, "vm")?;
-        if self.is_held(&name) {
-            bail!(HELD);
-        }
+        self.not_held(&name)?;
         if start.is_none() && !self.pointer.contains_key(&name) {
             bail!("pointer position unknown; pass start_coordinate");
         }
@@ -540,7 +565,7 @@ impl Server {
     fn scroll(&mut self, args: &Value) -> Result<Vec<Value>> {
         let (x, y) = coord(args, "coordinate")?.context("\"coordinate\" is required: [x, y]")?;
         let direction = string(args, "scroll_direction")?.context("\"scroll_direction\" is required: up, down, left or right")?;
-        let n = int(args, "scroll_amount", 1, 50, 5)? as i32;
+        let n = int(args, "scroll_amount", 1, 50, 3)? as i32;
         let (dx, dy) = match direction.to_lowercase().as_str() {
             "up" => (0, -n),
             "down" => (0, n),
@@ -550,16 +575,14 @@ impl Server {
         };
         let modifiers = keys::parse_modifiers(&string(args, "modifiers")?.unwrap_or_default())?;
         let name = self.vm_name(args, "vm")?;
-        if self.is_held(&name) {
-            bail!(HELD);
-        }
+        self.not_held(&name)?;
         let (target, mut vnc) = self.input(args)?;
         let geo = self.geo(&vnc);
         geo.check(x, y)?;
         let (nx, ny) = geo.to_native(x, y);
         record::note(&target, "move", nx, ny);
         keys::modifiers_down(&mut vnc, &modifiers, true)?;
-        vnc.scroll(nx, ny, dx, dy)?;
+        vnc.scroll(&target.id, nx, ny, dx, dy)?;
         keys::modifiers_down(&mut vnc, &modifiers, false)?;
         vnc.finish()?;
         self.pointer.insert(target.id, (nx, ny));
@@ -709,15 +732,18 @@ fn is_bundle_id(app: &str) -> bool {
     parts.len() >= 2 && parts.iter().all(|p| !p.is_empty() && p.chars().all(|c| c.is_ascii_alphanumeric() || c == '-'))
 }
 
-fn run(vm: &str, command: &str, timeout: u64) -> Result<(i32, Vec<u8>, Vec<u8>)> {
+fn run(vm: &str, command: &str, timeout: u64, input: Option<&[u8]>) -> Result<(i32, Vec<u8>, Vec<u8>)> {
     let (spec, ip) = crate::reachable(vm)?;
     let mut child = machine::ssh_command(&spec, &ip)
         .args(["-o", "BatchMode=yes"])
         .arg(format!("/bin/zsh -lc {}", machine::shell_quote(command)))
-        .stdin(Stdio::null())
+        .stdin(if input.is_some() { Stdio::piped() } else { Stdio::null() })
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()?;
+    if let (Some(data), Some(mut stdin)) = (input, child.stdin.take()) {
+        stdin.write_all(data)?;
+    }
     let pipe = |stream: Option<Box<dyn Read + Send>>| {
         std::thread::spawn(move || {
             let mut buf = Vec::new();
@@ -755,6 +781,17 @@ fn tail(bytes: &[u8]) -> String {
     }
     let start = text.char_indices().nth(count - LIMIT).map(|(i, _)| i).unwrap_or(0);
     format!("[...truncated {start} bytes...]{}", &text[start..])
+}
+
+fn check_arguments(tool: &Value, args: &Value) -> Result<()> {
+    let properties = tool["inputSchema"]["properties"].as_object().cloned().unwrap_or_default();
+    let unknown: Vec<&String> = args.as_object().into_iter().flatten().map(|(k, _)| k).filter(|k| !properties.contains_key(*k)).collect();
+    if unknown.is_empty() {
+        return Ok(());
+    }
+    let names = |keys: Vec<&String>| keys.iter().map(|k| format!("\"{k}\"")).collect::<Vec<_>>().join(", ");
+    let valid = if properties.is_empty() { "none".to_string() } else { names(properties.keys().collect()) };
+    bail!("Unknown argument {} for {}; valid arguments: {valid}.", names(unknown), tool["name"].as_str().unwrap_or("?"))
 }
 
 fn text(s: String) -> Value {
@@ -851,8 +888,8 @@ fn tools() -> Vec<Value> {
         tool("left_click_drag", "Drag", "Press the left button at start_coordinate (default: the current pointer), drag to coordinate and release. Moves windows, selects text, drags files.", json!({"coordinate": {"type": "array", "items": {"type": "number"}, "minItems": 2, "maxItems": 2, "description": "End point [x, y] in pixels of the most recent screenshot."}, "start_coordinate": {"type": "array", "items": {"type": "number"}, "minItems": 2, "maxItems": 2, "description": "Start point [x, y]; defaults to the current pointer position."}}), &["coordinate"], true),
         tool("left_mouse_down", "Left button down", "Press and hold the left button at the current pointer (place it with mouse_move first). Follow with mouse_move calls and left_mouse_up.", json!({}), &[], true),
         tool("left_mouse_up", "Left button up", "Release the left button at the current pointer.", json!({}), &[], true),
-        tool("scroll", "Scroll", "Scroll with the mouse wheel at a point (the pointer moves there first). The VM's VNC input may ignore wheel events: if the next screenshot shows no movement, click into the view and use key with pagedown/pageup/space/arrows, or drag the scrollbar.", json!({"coordinate": coord, "scroll_direction": {"type": "string", "enum": ["up", "down", "left", "right"]}, "scroll_amount": {"type": "integer", "minimum": 1, "maximum": 50, "default": 5, "description": "Wheel ticks"}, "modifiers": mods}), &["coordinate", "scroll_direction"], true),
-        tool("type", "Type text", "Type text with the keyboard into the focused element.", json!({"text": {"type": "string", "description": "Text to type literally into the focused element. \\n presses Return, \\t presses Tab. For shortcuts use key. Only ASCII types reliably; for other characters (é, ✓, emoji) run exec with \"printf '...' | pbcopy\" and press cmd+v."}}), &["text"], true),
+        tool("scroll", "Scroll", "Scroll with the mouse wheel at a point (the pointer moves there first), scrolling whatever view is under it. One tick is one wheel notch, roughly 10 lines of text; take a screenshot to see where it landed.", json!({"coordinate": coord, "scroll_direction": {"type": "string", "enum": ["up", "down", "left", "right"]}, "scroll_amount": {"type": "integer", "minimum": 1, "maximum": 50, "default": 3, "description": "Wheel ticks (notches)"}, "modifiers": mods}), &["coordinate", "scroll_direction"], true),
+        tool("type", "Type text", "Type text with the keyboard into the focused element.", json!({"text": {"type": "string", "description": "Text to type literally into the focused element. \\n presses Return, \\t presses Tab. For shortcuts use key. Non-ASCII characters (é, ✓, emoji) are pasted through the VM clipboard."}}), &["text"], true),
         tool("key", "Press keys", "Press a key or key combination (shortcut), or a sequence of them.", json!({"keys": {"type": "string", "description": "One key or chord, or several separated by spaces to press in order, e.g. \"cmd+a\", \"return\", \"cmd+space\", \"escape tab tab return\". Keys: return, tab, escape, backspace (Mac delete), forwarddelete, space, up, down, left, right, home, end, pageup, pagedown, f1-f20, or one character. Modifiers: cmd, shift, ctrl, option."}, "repeat": {"type": "integer", "minimum": 1, "maximum": 100, "default": 1, "description": "How many times to press the whole sequence"}}), &["keys"], true),
         tool("hold_key", "Hold key", "Hold a key or chord down for a duration, then release it.", json!({"keys": {"type": "string", "description": "One key or chord, e.g. \"shift\" or \"cmd+tab\""}, "duration_seconds": {"type": "number", "minimum": 0, "maximum": 10}}), &["keys", "duration_seconds"], true),
         tool("cursor_position", "Cursor position", "Report the pointer position in screenshot pixels. This is the last position set by this server's mouse tools; the VM does not report moves made by a human.", json!({}), &[], true),
@@ -925,6 +962,14 @@ mod tests {
         assert_eq!(keys::parse_combo("cmd++").unwrap(), (vec![0xffe9], '+' as u32));
         assert!(keys::parse_modifiers("cmd+hyper").is_err());
         assert_eq!(keys::parse_modifiers(" cmd + Shift ").unwrap(), vec![0xffe9, 0xffe1]);
+    }
+
+    #[test]
+    fn unknown_arguments() {
+        let wait = tools().into_iter().find(|t| t["name"] == "wait").unwrap();
+        assert!(check_arguments(&wait, &json!({"duration_seconds": 1})).is_ok());
+        let err = check_arguments(&wait, &json!({"seconds": "1"})).unwrap_err().to_string();
+        assert!(err.contains("\"seconds\"") && err.contains("\"duration_seconds\""));
     }
 
     #[test]

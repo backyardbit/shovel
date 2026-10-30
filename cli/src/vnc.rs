@@ -9,10 +9,6 @@ use std::time::Duration;
 pub const BUTTON_LEFT: u8 = 1;
 pub const BUTTON_MIDDLE: u8 = 2;
 pub const BUTTON_RIGHT: u8 = 4;
-const WHEEL_UP: u8 = 8;
-const WHEEL_DOWN: u8 = 16;
-const WHEEL_LEFT: u8 = 32;
-const WHEEL_RIGHT: u8 = 64;
 
 pub struct Vnc {
     stream: TcpStream,
@@ -280,21 +276,12 @@ impl Vnc {
         Ok(())
     }
 
-    pub fn scroll(&mut self, x: u16, y: u16, dx: i32, dy: i32) -> Result<()> {
+    pub fn scroll(&mut self, vm: &str, x: u16, y: u16, dx: i32, dy: i32) -> Result<()> {
         self.pointer(0, x, y)?;
+        self.stream.flush()?;
+        pause(60);
+        crate::host::request(serde_json::json!({"cmd": "scroll", "id": vm, "dx": dx, "dy": dy}))?;
         pause(30);
-        let vertical = if dy > 0 { WHEEL_DOWN } else { WHEEL_UP };
-        for _ in 0..dy.unsigned_abs() {
-            self.pointer(vertical, x, y)?;
-            self.pointer(0, x, y)?;
-            pause(15);
-        }
-        let horizontal = if dx > 0 { WHEEL_RIGHT } else { WHEEL_LEFT };
-        for _ in 0..dx.unsigned_abs() {
-            self.pointer(horizontal, x, y)?;
-            self.pointer(0, x, y)?;
-            pause(15);
-        }
         Ok(())
     }
 

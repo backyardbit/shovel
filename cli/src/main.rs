@@ -460,7 +460,7 @@ fn run(cli: Cli) -> Result<()> {
             let target = Target::resolve(&name)?;
             let mut vnc = connect_vnc(&target, force)?;
             record::note(&target, "move", x, y);
-            vnc.scroll(x, y, dx, dy)?;
+            vnc.scroll(&target.id, x, y, dx, dy)?;
             vnc.finish()?;
             emit(json, json!({"ok": true}), String::new);
             Ok(())

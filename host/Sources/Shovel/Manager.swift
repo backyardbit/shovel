@@ -91,6 +91,15 @@ final class Manager {
                 }
                 setController(vm, controller)
                 reply(["ok": true, "vm": vm.info])
+            case "scroll":
+                let vm = try runningVM(request)
+                let dx = request["dx"] as? Int ?? 0
+                let dy = request["dy"] as? Int ?? 0
+                guard abs(dx) <= 1000, abs(dy) <= 1000 else { throw ShovelError("scroll amount must be at most 1000 ticks") }
+                guard SHSendScrollWheel(vm.machine, dx, dy) else {
+                    throw ShovelError("this macOS version does not support scroll input to VMs")
+                }
+                reply(["ok": true])
             case "install":
                 try install(request, reply: reply)
             case "job":

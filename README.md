@@ -85,7 +85,9 @@ GUI apps don't inherit your shell `PATH`, so use the absolute path from `which s
 
 Tools: `screenshot`, `zoom`, `left_click`, `right_click`, `middle_click`, `double_click`, `triple_click`, `mouse_move`, `left_click_drag`, `left_mouse_down`, `left_mouse_up`, `scroll`, `type`, `key`, `hold_key`, `cursor_position`, `wait`, `exec`, `open_application`, `type_password`, `wait_for_control`, `vm_view`, `vm_list`, `vm_up`, `vm_down`. Screenshots come back inline as PNG images of at most 1280x800 (`--max-width`/`--max-height`), and the coordinates the agent reads off a screenshot are the ones it clicks; the server maps them to the VM display. `vm_down` only deletes VMs that the same server created.
 
-Known limits: the VM's VNC input ignores mouse-wheel events, so `scroll` may not move a view (agents are told to fall back to keys or the scrollbar); `type` only types ASCII reliably (other text goes through `exec "printf ... | pbcopy"` and cmd+v); the pointer is not drawn in screenshots.
+Codex: some Codex builds list MCP tools through a tool search instead of the model's tool list, so a model can miss them. Naming them in the prompt ("using the shovel MCP tools, ...") makes it look them up.
+
+Known limits: the pointer is not drawn in screenshots, and non-ASCII text is typed by pasting it through the VM clipboard (so `type` overwrites the guest clipboard when the text has characters like é or ✓).
 
 ## Recording demos for PRs
 
