@@ -28,6 +28,10 @@ description: Shovel macOS VMs — use when a task needs a throwaway Mac to insta
 - When a dialog or login screen asks for the user's password, click the password field, then run `shovel password type <name> --enter`. It types the guest password from the host keychain without revealing it; never ask for or try to read the password. If it fails with "no password saved", ask the user to run `shovel password set <image>` in a terminal.
 - Take a fresh screenshot after each action you need to verify — the screen is the only ground truth for GUI state.
 
+## Computer-use tools (MCP)
+
+If `shovel` MCP tools are available (`screenshot`, `left_click`, `type`, `key`, `exec`, `vm_up`, ...), prefer them over the GUI CLI commands: screenshots arrive inline and coordinates are mapped for you (use the pixels of the latest screenshot). Without a bound VM, call `vm_up` with a new name first, and `vm_down` with `remove=true` when done. To register them: `claude mcp add shovel -- shovel mcp` (add `-e SHOVEL_VM=<name>` to bind a VM). The takeover rule is the same: on a "human has taken control" error, call `wait_for_control`, then take a screenshot.
+
 ## Demo recordings for PRs
 
 When you build a user-visible feature, prove it with a recording on the PR:

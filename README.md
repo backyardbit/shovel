@@ -54,6 +54,39 @@ shovel takeover t1 / shovel release t1
 shovel down t1 --rm
 ```
 
+## Computer use over MCP (any agent)
+
+`shovel mcp` is a stdio [MCP](https://modelcontextprotocol.io) server, so any MCP client (Claude Code, Codex, Cursor, Claude Desktop, or your own agent on an MCP SDK) sees the VM as a screen it can screenshot, click and type into, with the same kind of tools it uses for computer use on a real desktop. Bind a VM with `--vm` or `SHOVEL_VM`, or let the agent call `vm_up` to create one.
+
+Claude Code:
+
+```sh
+claude mcp add shovel -- shovel mcp                    # agent creates a VM with vm_up
+claude mcp add shovel -e SHOVEL_VM=t1 -- shovel mcp    # bound to VM t1
+```
+
+Codex (`~/.codex/config.toml`):
+
+```toml
+[mcp_servers.shovel]
+command = "shovel"
+args = ["mcp"]
+tool_timeout_sec = 300
+default_tools_approval_mode = "approve"   # otherwise every click needs approval (and fails in `codex exec`)
+```
+
+Claude Desktop, Cursor (`.cursor/mcp.json`) and SDK clients use the usual `mcpServers` block:
+
+```json
+{"mcpServers": {"shovel": {"command": "/usr/local/bin/shovel", "args": ["mcp"], "env": {"SHOVEL_VM": "t1"}}}}
+```
+
+GUI apps don't inherit your shell `PATH`, so use the absolute path from `which shovel`.
+
+Tools: `screenshot`, `zoom`, `left_click`, `right_click`, `middle_click`, `double_click`, `triple_click`, `mouse_move`, `left_click_drag`, `left_mouse_down`, `left_mouse_up`, `scroll`, `type`, `key`, `hold_key`, `cursor_position`, `wait`, `exec`, `open_application`, `type_password`, `wait_for_control`, `vm_view`, `vm_list`, `vm_up`, `vm_down`. Screenshots come back inline as PNG images of at most 1280x800 (`--max-width`/`--max-height`), and the coordinates the agent reads off a screenshot are the ones it clicks; the server maps them to the VM display. `vm_down` only deletes VMs that the same server created.
+
+Known limits: the VM's VNC input ignores mouse-wheel events, so `scroll` may not move a view (agents are told to fall back to keys or the scrollbar); `type` only types ASCII reliably (other text goes through `exec "printf ... | pbcopy"` and cmd+v); the pointer is not drawn in screenshots.
+
 ## Recording demos for PRs
 
 ```sh
