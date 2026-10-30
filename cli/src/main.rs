@@ -2,6 +2,7 @@ mod github;
 mod host;
 mod keys;
 mod machine;
+mod password;
 mod paths;
 mod record;
 mod vnc;
@@ -186,6 +187,11 @@ enum Cmd {
         #[arg(long, help = "Print the comment without uploading")]
         dry_run: bool,
     },
+    #[command(about = "Type the guest account password without revealing it, e.g. into a login or auth dialog")]
+    Password {
+        #[command(subcommand)]
+        command: PasswordCmd,
+    },
     #[command(about = "Control the Shovel host app")]
     Host {
         #[command(subcommand)]
@@ -253,6 +259,28 @@ enum RecordCmd {
         fps: u32,
         #[arg(long)]
         max_seconds: u64,
+    },
+}
+
+#[derive(Subcommand)]
+enum PasswordCmd {
+    #[command(about = "Type the password into the focused field of a VM")]
+    Type {
+        name: String,
+        #[arg(long, help = "Press Return afterwards")]
+        enter: bool,
+        #[arg(long)]
+        force: bool,
+    },
+    #[command(about = "Save an image's guest password in the login keychain (prompts)")]
+    Set {
+        #[arg(default_value = "base")]
+        image: String,
+    },
+    #[command(about = "Forget an image's saved guest password")]
+    Rm {
+        #[arg(default_value = "base")]
+        image: String,
     },
 }
 
@@ -448,6 +476,7 @@ fn run(cli: Cli) -> Result<()> {
             emit(json, json!({"ok": true}), String::new);
             Ok(())
         }
+        Cmd::Password { command } => password_cmd(json, command),
         Cmd::View { name } => {
             let target = Target::resolve(&name)?;
             ensure_running(&target)?;
@@ -881,6 +910,42 @@ fn copy(json: bool, src: &str, dst: &str) -> Result<()> {
     Ok(())
 }
 
+fn password_cmd(json: bool, command: PasswordCmd) -> Result<()> {
+    match command {
+        PasswordCmd::Type { name, enter, force } => {
+            let target = Target::resolve(&name)?;
+            let image = match name.strip_prefix("image:") {
+                Some(image) => image.to_string(),
+                None => target.spec()?.image.with_context(|| format!("{name} does not record which image it came from"))?,
+            };
+            let secret = password::get(&image)?;
+            let mut vnc = connect_vnc(&target, force)?;
+            keys::type_text(&mut vnc, &secret)?;
+            if enter {
+                keys::press(&mut vnc, "return")?;
+            }
+            vnc.finish()?;
+            emit(json, json!({"ok": true}), String::new);
+            Ok(())
+        }
+        PasswordCmd::Set { image } => {
+            if !paths::image(&image).join("config.json").exists() {
+                bail!("no image named '{image}'");
+            }
+            password::set(&image)?;
+            emit(json, json!({"ok": true, "image": image}), || format!("password saved for image '{image}'"));
+            Ok(())
+        }
+        PasswordCmd::Rm { image } => {
+            let removed = password::remove(&image)?;
+            emit(json, json!({"ok": true, "removed": removed}), || {
+                if removed { format!("password for image '{image}' removed") } else { format!("no password saved for image '{image}'") }
+            });
+            Ok(())
+        }
+    }
+}
+
 fn image(json: bool, command: ImageCmd) -> Result<()> {
     match command {
         ImageCmd::Create { name, ipsw, disk_gb, cpus, memory_gb, detach, force } => {
@@ -963,7 +1028,8 @@ fn image(json: bool, command: ImageCmd) -> Result<()> {
                     "The image is booting in a Shovel window. One-time setup:\n\
                      \n  1. Go through Setup Assistant. Create an admin account named '{user}' (same as your Mac,\n     so paths like ~/workspace match). Skip Apple Account sign-in and FileVault.\n\
                      \n  2. Open Terminal in the VM and run:\n       bash \"/Volumes/My Shared Files/shovel/setup.sh\"\n\
-                     \n  3. Run `shovel image stop {name}`.\n\
+                     \n  3. Run `shovel password set {name}` here and enter the same password, so agents can\n     type it into auth dialogs with `shovel password type <vm>` without seeing it.\n\
+                     \n  4. Run `shovel image stop {name}`.\n\
                      \nAfter that, `shovel up <vm-name>` clones this image in seconds.",
                     user = spec.user
                 )

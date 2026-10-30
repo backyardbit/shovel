@@ -25,6 +25,7 @@ description: Shovel macOS VMs — use when a task needs a throwaway Mac to insta
 - `shovel --json screenshot <name>` returns `{"path": ...}`; read that PNG to see the screen.
 - `click`, `drag`, `scroll`, `move` take coordinates in the screenshot's pixel space (1440×900 by default).
 - `type <name> '<text>'` types literally; `key <name> cmd+space return` presses combos in order.
+- When a dialog or login screen asks for the user's password, click the password field, then run `shovel password type <name> --enter`. It types the guest password from the host keychain without revealing it; never ask for or try to read the password. If it fails with "no password saved", ask the user to run `shovel password set <image>` in a terminal.
 - Take a fresh screenshot after each action you need to verify — the screen is the only ground truth for GUI state.
 
 ## Demo recordings for PRs

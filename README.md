@@ -32,6 +32,7 @@ cp -R skills/shovel ~/.claude/skills/   # teach Claude Code to use it
 ```sh
 shovel image create          # downloads the latest macOS IPSW (~17 GB) and installs it
 shovel image setup           # boots it in a window; follow the printed checklist
+shovel password set          # save the guest account password in your login keychain
 shovel image stop
 ```
 
@@ -47,6 +48,7 @@ shovel screenshot t1                  # prints the PNG path
 shovel click t1 720 450
 shovel type t1 'hello'
 shovel key t1 cmd+space
+shovel password type t1 --enter       # types the guest password into the focused field
 shovel view t1                        # live window; "Take Over" pauses agent input
 shovel takeover t1 / shovel release t1
 shovel down t1 --rm
