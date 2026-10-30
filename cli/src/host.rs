@@ -52,6 +52,17 @@ fn connect(launch_if_needed: bool) -> Result<UnixStream> {
     bail!("Shovel host did not start; try `open -a Shovel` and check Console.app for errors")
 }
 
+pub fn wait_for_exit(timeout: Duration) -> Result<()> {
+    let deadline = Instant::now() + timeout;
+    while UnixStream::connect(paths::socket()).is_ok() {
+        if Instant::now() >= deadline {
+            bail!("Shovel host is still running after {}s", timeout.as_secs());
+        }
+        std::thread::sleep(Duration::from_millis(200));
+    }
+    Ok(())
+}
+
 pub fn app_path() -> Option<PathBuf> {
     let mut candidates = Vec::new();
     if let Ok(custom) = std::env::var("SHOVEL_APP") {

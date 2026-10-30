@@ -37,6 +37,8 @@ pub struct Spec {
     pub workspace_source: Option<String>,
     #[serde(default)]
     pub workspace_mode: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub idle_suspend_minutes: Option<u64>,
 }
 
 pub struct Target {
@@ -81,6 +83,10 @@ pub fn save(dir: &Path, spec: &Spec) -> Result<()> {
     std::fs::create_dir_all(dir)?;
     std::fs::write(dir.join("config.json"), serde_json::to_string_pretty(spec)?)?;
     Ok(())
+}
+
+pub fn state_file(dir: &Path) -> PathBuf {
+    dir.join("state.vzvmsave")
 }
 
 pub fn current_user() -> String {

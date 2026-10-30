@@ -78,9 +78,7 @@ pub fn start(target: &Target, output: Option<PathBuf>, fps: u32, max_seconds: u6
     if let Some(state) = active(target) {
         bail!("{} is already recording to {}", target.id, state["mp4"].as_str().unwrap_or("?"));
     }
-    if host::status(&target.id)?["state"] != "running" {
-        bail!("{} is not running", target.id);
-    }
+    crate::ensure_running(target)?;
     encoder_binary()?;
     let mp4 = match output {
         Some(path) => path.with_extension("mp4"),

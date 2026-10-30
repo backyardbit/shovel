@@ -43,7 +43,7 @@ enum Cmd {
         #[command(subcommand)]
         command: ImageCmd,
     },
-    #[command(about = "Create (if needed) and boot a VM, then wait until SSH is ready")]
+    #[command(about = "Create (if needed) and boot or resume a VM, then wait until SSH is ready")]
     Up {
         name: String,
         #[arg(long, default_value = "base", help = "Golden image to clone from")]
@@ -62,8 +62,14 @@ enum Cmd {
         no_wait: bool,
         #[arg(long, default_value_t = 300, help = "Seconds to wait for SSH")]
         timeout: u64,
+        #[arg(long, help = "Discard saved suspend state and cold boot")]
+        fresh: bool,
+        #[arg(long, value_name = "MINUTES", help = "Suspend automatically after this many idle minutes (0 = off); saved in the VM config")]
+        idle_suspend: Option<u64>,
     },
-    #[command(about = "Shut a VM down")]
+    #[command(about = "Save the VM's state to disk and stop it, freeing its RAM; `shovel up` resumes it")]
+    Suspend { name: String },
+    #[command(about = "Shut a VM down (a suspended VM's saved state is discarded)")]
     Down {
         name: String,
         #[arg(long, help = "Delete the VM after stopping it")]
@@ -345,8 +351,21 @@ fn run(cli: Cli) -> Result<()> {
     let json = cli.json;
     match cli.command {
         Cmd::Image { command } => image(json, command),
-        Cmd::Up { name, from, share, share_mode, cpus, memory_gb, view, no_wait, timeout } => {
-            up(json, &name, &from, share, share_mode, cpus, memory_gb, view, no_wait, timeout)
+        Cmd::Up { name, from, share, share_mode, cpus, memory_gb, view, no_wait, timeout, fresh, idle_suspend } => {
+            let options = Boot { cpus, memory_gb, view, fresh, idle_suspend };
+            up(json, &name, &from, share, share_mode, options, no_wait, timeout)
+        }
+        Cmd::Suspend { name } => {
+            let target = Target::resolve(&name)?;
+            let reply = suspend(&target)?;
+            emit(json, reply.clone(), || {
+                format!(
+                    "{name} suspended in {:.1}s ({:.1} GB saved state); `shovel up {name}` resumes it",
+                    reply["seconds"].as_f64().unwrap_or(0.0),
+                    reply["state_bytes"].as_u64().unwrap_or(0) as f64 / 1e9
+                )
+            });
+            Ok(())
         }
         Cmd::Down { name, rm, force } => {
             let target = Target::resolve(&name)?;
@@ -379,7 +398,7 @@ fn run(cli: Cli) -> Result<()> {
                 format!(
                     "{}: {} (control: {}, ip: {})",
                     name,
-                    value["state"].as_str().unwrap_or("?"),
+                    state_label(&value),
                     value["controller"].as_str().unwrap_or("-"),
                     value["ip"].as_str().unwrap_or("-")
                 )
@@ -564,7 +583,9 @@ fn run(cli: Cli) -> Result<()> {
                 Ok(())
             }
             HostCmd::Stop => {
-                host::request_if_running(json!({"cmd": "quit"}))?;
+                if host::request_if_running(json!({"cmd": "quit"}))?.is_some() {
+                    host::wait_for_exit(Duration::from_secs(150))?;
+                }
                 emit(json, json!({"ok": true}), || "Shovel host stopped".into());
                 Ok(())
             }
@@ -591,15 +612,32 @@ fn running(id: &str) -> Result<bool> {
     Ok(host::status(id)?["state"] != "stopped")
 }
 
+fn saved_state(dir: &std::path::Path, state: &str) -> (String, Option<u64>) {
+    match std::fs::metadata(machine::state_file(dir)) {
+        Ok(meta) if state == "stopped" => ("suspended".into(), Some(meta.len())),
+        _ => (state.to_string(), None),
+    }
+}
+
+fn state_label(row: &Value) -> String {
+    let state = row["state"].as_str().unwrap_or("?");
+    match row["state_bytes"].as_u64() {
+        Some(bytes) => format!("{state} ({:.1}G)", bytes as f64 / 1e9),
+        None => state.to_string(),
+    }
+}
+
 fn describe(target: &Target) -> Result<Value> {
     let spec = target.spec()?;
     let status = host::status(&target.id)?;
-    let state = status["state"].as_str().unwrap_or("stopped").to_string();
+    let (state, state_bytes) = saved_state(&target.dir, status["state"].as_str().unwrap_or("stopped"));
     let ip = if state == "running" { machine::lookup_ip(&spec.mac) } else { None };
     Ok(json!({
         "ok": true,
         "name": target.id,
         "state": state,
+        "state_bytes": state_bytes,
+        "idle_suspend_minutes": spec.idle_suspend_minutes,
         "controller": status.get("controller").cloned().unwrap_or(Value::Null),
         "viewer_open": status.get("viewer_open").cloned().unwrap_or(Value::Bool(false)),
         "ip": ip,
@@ -614,26 +652,75 @@ fn describe(target: &Target) -> Result<Value> {
     }))
 }
 
-fn ensure_running(target: &Target) -> Result<()> {
-    if !running(&target.id)? {
+fn wake(target: &Target) -> Result<Value> {
+    let ip = target.spec().ok().and_then(|spec| machine::lookup_ip(&spec.mac));
+    let reply = host::request(json!({"cmd": "wake", "id": target.id, "dir": target.dir, "ip": ip}))?;
+    if reply["resumed"] == true {
+        eprintln!("shovel: resumed {} from saved state in {:.1}s", target.id, reply["seconds"].as_f64().unwrap_or(0.0));
+        sync_clock(target);
+    }
+    Ok(reply)
+}
+
+fn sync_clock(target: &Target) {
+    let Ok(spec) = target.spec() else { return };
+    let Some(ip) = machine::lookup_ip(&spec.mac) else { return };
+    if machine::wait_for_ssh(&spec, &ip, Instant::now() + Duration::from_secs(30)).is_err() {
+        return;
+    }
+    let now = SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
+    let _ = machine::ssh_command(&spec, &ip)
+        .args(["-o", "BatchMode=yes", &format!("sudo -n date -f %s {now}")])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status();
+}
+
+fn awake(target: &Target) -> Result<Value> {
+    let reply = wake(target)?;
+    if reply["vm"]["state"] != "running" {
         bail!("{} is not running; start it with `shovel up {}`", target.id, target.id);
     }
-    Ok(())
+    Ok(reply)
+}
+
+fn ensure_running(target: &Target) -> Result<()> {
+    awake(target).map(|_| ())
 }
 
 fn reachable(name: &str) -> Result<(Spec, String)> {
     let target = Target::resolve(name)?;
-    ensure_running(&target)?;
+    awake(&target)?;
     let spec = target.spec()?;
     let ip = machine::lookup_ip(&spec.mac).context("the VM has no IP address yet; wait for `shovel up` to finish")?;
     Ok((spec, ip))
 }
 
-fn connect_vnc(target: &Target, force: bool) -> Result<vnc::Vnc> {
-    let status = host::status(&target.id)?;
-    if status["state"] != "running" {
-        bail!("{} is not running; start it with `shovel up {}`", target.id, target.id);
+fn suspend(target: &Target) -> Result<Value> {
+    if target.id.starts_with("image:") {
+        bail!("images cannot be suspended; use `shovel image stop`");
     }
+    if !running(&target.id)? {
+        if machine::state_file(&target.dir).exists() {
+            return Ok(json!({"ok": true, "name": target.id, "state": "suspended", "seconds": 0, "state_bytes": std::fs::metadata(machine::state_file(&target.dir))?.len()}));
+        }
+        bail!("{} is not running", target.id);
+    }
+    let reply = host::request(json!({"cmd": "suspend", "id": target.id}))?;
+    Ok(json!({"ok": true, "name": target.id, "state": "suspended", "seconds": reply["seconds"], "state_bytes": reply["state_bytes"]}))
+}
+
+fn discard_state(target: &Target) -> Result<()> {
+    let path = machine::state_file(&target.dir);
+    if path.exists() && !running(&target.id)? {
+        std::fs::remove_file(&path).with_context(|| format!("removing {}", path.display()))?;
+    }
+    Ok(())
+}
+
+fn connect_vnc(target: &Target, force: bool) -> Result<vnc::Vnc> {
+    let status = awake(target)?["vm"].clone();
     if status["controller"] == "human" && !force {
         return Err(HumanControl(target.id.clone()).into());
     }
@@ -656,6 +743,14 @@ fn set_controller(json: bool, name: &str, controller: &str) -> Result<()> {
     Ok(())
 }
 
+struct Boot {
+    cpus: Option<u32>,
+    memory_gb: Option<u64>,
+    view: bool,
+    fresh: bool,
+    idle_suspend: Option<u64>,
+}
+
 #[allow(clippy::too_many_arguments)]
 fn up(
     json: bool,
@@ -663,17 +758,22 @@ fn up(
     from: &str,
     share: Option<PathBuf>,
     share_mode: ShareMode,
-    cpus: Option<u32>,
-    memory_gb: Option<u64>,
-    view: bool,
+    options: Boot,
     no_wait: bool,
     timeout: u64,
 ) -> Result<()> {
-    let (target, spec) = start_vm(name, from, share, share_mode, cpus, memory_gb, view)?;
+    let (target, spec, reply) = start_vm(name, from, share, share_mode, options)?;
+    let resumed = reply["resumed"] == true;
+    if resumed {
+        if !json {
+            eprintln!("Resumed {name} from saved state in {:.1}s", reply["seconds"].as_f64().unwrap_or(0.0));
+        }
+        sync_clock(&target);
+    }
     let mut ip = None;
     if !no_wait {
         let deadline = Instant::now() + Duration::from_secs(timeout);
-        if !json {
+        if !json && !resumed {
             eprintln!("Waiting for {name} to boot...");
         }
         let addr = machine::wait_for_ip(&spec, deadline)?;
@@ -681,6 +781,7 @@ fn up(
         ip = Some(addr);
     }
     let mut value = describe(&target)?;
+    value["resumed"] = json!(resumed);
     if ip.is_some() {
         value["ip"] = json!(ip);
     }
@@ -694,21 +795,17 @@ fn up(
     Ok(())
 }
 
-fn start_vm(
-    name: &str,
-    from: &str,
-    share: Option<PathBuf>,
-    share_mode: ShareMode,
-    cpus: Option<u32>,
-    memory_gb: Option<u64>,
-    view: bool,
-) -> Result<(Target, Spec)> {
+fn start_vm(name: &str, from: &str, share: Option<PathBuf>, share_mode: ShareMode, options: Boot) -> Result<(Target, Spec, Value)> {
+    let Boot { cpus, memory_gb, view, fresh, idle_suspend } = options;
     machine::validate_name(name)?;
     machine::ensure_guest_files()?;
     let dir = paths::vm(name);
     if !dir.join("config.json").exists() {
         create_vm(name, from, share, share_mode, cpus, memory_gb)?;
     } else if cpus.is_some() || memory_gb.is_some() {
+        if machine::state_file(&dir).exists() && !fresh {
+            bail!("{name} is suspended; changing --cpus/--memory-gb needs a cold boot: `shovel up {name} --fresh` (discards the saved state)");
+        }
         let mut spec = machine::load(&dir)?;
         if let Some(c) = cpus {
             spec.cpus = c;
@@ -718,10 +815,18 @@ fn start_vm(
         }
         machine::save(&dir, &spec)?;
     }
+    if let Some(minutes) = idle_suspend {
+        let mut spec = machine::load(&dir)?;
+        spec.idle_suspend_minutes = Some(minutes).filter(|m| *m > 0);
+        machine::save(&dir, &spec)?;
+    }
+    if fresh && running(name)? {
+        bail!("{name} is running; `--fresh` only applies to a stopped or suspended VM (`shovel down {name}` first)");
+    }
     let target = Target::resolve(name)?;
     let spec = target.spec()?;
-    host::request(json!({"cmd": "start", "id": name, "dir": dir, "view": view}))?;
-    Ok((target, spec))
+    let reply = host::request(json!({"cmd": "start", "id": name, "dir": dir, "view": view, "fresh": fresh}))?;
+    Ok((target, spec, reply))
 }
 
 fn create_vm(
@@ -785,6 +890,7 @@ fn create_vm(
             image: Some(from.to_string()),
             workspace_source: Some(source.to_string_lossy().into_owned()),
             workspace_mode: Some(mode.to_string()),
+            idle_suspend_minutes: None,
         };
         machine::save(&dir, &spec)
     })();
@@ -796,7 +902,7 @@ fn create_vm(
 
 fn down(target: &Target, force: bool) -> Result<()> {
     if !running(&target.id)? {
-        return Ok(());
+        return discard_state(target);
     }
     if !force {
         let spec = target.spec()?;
@@ -821,7 +927,7 @@ fn down(target: &Target, force: bool) -> Result<()> {
     }
     let wait = if force { 0 } else { 60 };
     host::request(json!({"cmd": "stop", "id": target.id, "wait": wait}))?;
-    Ok(())
+    discard_state(target)
 }
 
 fn remove_vm(name: &str) -> Result<()> {
@@ -853,12 +959,12 @@ fn list(json: bool) -> Result<()> {
         if rows.is_empty() {
             return "No VMs. Create one with `shovel up <name>`.".into();
         }
-        let mut out = format!("{:<20} {:<10} {:<8} {:<16} {}", "NAME", "STATE", "CONTROL", "IP", "WORKSPACE");
+        let mut out = format!("{:<20} {:<17} {:<8} {:<16} {}", "NAME", "STATE", "CONTROL", "IP", "WORKSPACE");
         for r in &rows {
             out.push_str(&format!(
-                "\n{:<20} {:<10} {:<8} {:<16} {}",
+                "\n{:<20} {:<17} {:<8} {:<16} {}",
                 r["name"].as_str().unwrap_or(""),
-                r["state"].as_str().unwrap_or(""),
+                state_label(r),
                 r["controller"].as_str().unwrap_or("-"),
                 r["ip"].as_str().unwrap_or("-"),
                 r["workspace_mode"].as_str().unwrap_or("-"),
@@ -886,11 +992,13 @@ fn vm_rows() -> Result<Vec<Value>> {
         for name in names {
             let spec = machine::load(&paths::vm(&name))?;
             let status = live_vms.iter().find(|v| v["id"] == name.as_str());
-            let state = status.and_then(|s| s["state"].as_str()).unwrap_or("stopped").to_string();
+            let (state, state_bytes) = saved_state(&paths::vm(&name), status.and_then(|s| s["state"].as_str()).unwrap_or("stopped"));
             let ip = if state == "running" { machine::lookup_ip(&spec.mac) } else { None };
             rows.push(json!({
                 "name": name,
                 "state": state,
+                "state_bytes": state_bytes,
+                "idle_suspend_minutes": spec.idle_suspend_minutes,
                 "controller": status.map(|s| s["controller"].clone()).unwrap_or(Value::Null),
                 "ip": ip,
                 "image": spec.image,
@@ -1004,6 +1112,7 @@ fn image(json: bool, command: ImageCmd) -> Result<()> {
                 image: None,
                 workspace_source: None,
                 workspace_mode: None,
+                idle_suspend_minutes: None,
             };
             machine::save(&dir, &spec)?;
             let id = format!("image:{name}");

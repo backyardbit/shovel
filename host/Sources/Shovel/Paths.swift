@@ -21,3 +21,8 @@ func describe(_ error: Error) -> String {
     if let error = error as? ShovelError { return error.description }
     return (error as NSError).localizedDescription
 }
+
+func sentence(_ error: Error) -> String {
+    let text = describe(error)
+    return text.hasSuffix(".") ? text : text + "."
+}

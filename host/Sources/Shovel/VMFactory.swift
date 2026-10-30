@@ -19,6 +19,7 @@ struct VMSpec: Codable {
     var display: DisplaySpec
     var mac: String
     var shares: [ShareSpec]
+    var idle_suspend_minutes: Int?
 }
 
 enum VMFactory {
@@ -28,6 +29,10 @@ enum VMFactory {
             throw ShovelError("missing \(url.path)")
         }
         return try JSONDecoder().decode(VMSpec.self, from: data)
+    }
+
+    static func statePath(_ dir: URL) -> URL {
+        dir.appendingPathComponent("state.vzvmsave")
     }
 
     static func hardwareModel(_ dir: URL) throws -> VZMacHardwareModel {

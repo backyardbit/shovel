@@ -20,7 +20,8 @@ const INSTRUCTIONS: &str = r#"Shovel gives you a disposable macOS virtual machin
 3. The guest is macOS: shortcuts use cmd (cmd+space Spotlight, cmd+tab switch apps, cmd+q quit, cmd+w close). Use `exec` for anything scriptable (zsh over SSH, passwordless sudo, Homebrew on PATH) and the GUI for what needs the screen. Do not run osascript/AppleScript through exec (it can hang on a permission prompt); use open_application or the GUI instead.
 4. When a dialog asks for the user's password, click the password field and call type_password; it types the guest password without revealing it. Never ask for the password.
 5. A human may take over the VM. Input tools then fail with a "human has taken control" error: call wait_for_control, then screenshot before continuing. screenshot and exec keep working.
-6. When you are done with a VM you created with vm_up, call vm_down with remove=true."#;
+6. VMs keep their full RAM on the host while running. vm_suspend saves a VM's exact state (open apps, unsaved text, running processes) to disk and frees its RAM; any tool that needs the VM resumes it automatically in a few seconds, and vm_up resumes it too. Suspend a VM you will come back to later instead of leaving it idle.
+7. When you are done with a VM you created with vm_up, call vm_down with remove=true."#;
 
 const HELD: &str = "The left button is held (left_mouse_down); call left_mouse_up first.";
 
@@ -35,6 +36,7 @@ struct Server {
     pointer: HashMap<String, (u16, u16)>,
     held: Option<(String, Vnc)>,
     created: HashSet<String>,
+    notes: Vec<String>,
 }
 
 #[derive(Clone, Copy)]
@@ -58,6 +60,7 @@ pub fn serve(vm: Option<String>, max_width: u32, max_height: u32) -> Result<()> 
         pointer: HashMap::new(),
         held: None,
         created: HashSet::new(),
+        notes: Vec::new(),
     };
     for line in std::io::stdin().lock().lines() {
         let line = line?;
@@ -128,12 +131,16 @@ impl Server {
                     _ => json!({}),
                 };
                 let started = Instant::now();
+                self.notes.clear();
                 let outcome = check_arguments(&tool, &args).and_then(|_| self.call(name, &args));
                 eprintln!("shovel mcp: {name} {}ms", started.elapsed().as_millis());
+                let mut content: Vec<Value> = self.notes.drain(..).map(text).collect();
+                let failed = outcome.is_err();
                 match outcome {
-                    Ok(content) => json!({"content": content, "isError": false}),
-                    Err(err) => json!({"content": [text(format!("{err:#}"))], "isError": true}),
+                    Ok(result) => content.extend(result),
+                    Err(err) => content.push(text(format!("{err:#}"))),
                 }
+                json!({"content": content, "isError": failed})
             }
             _ => return Some(error(id, -32601, "Method not found")),
         };
@@ -308,6 +315,17 @@ impl Server {
                 Ok(vec![text(serde_json::to_string_pretty(&listing)?)])
             }
             "vm_up" => self.vm_up(args),
+            "vm_suspend" => {
+                let name = self.vm_name(args, "name")?;
+                let target = Target::resolve(&name)?;
+                self.release_held(&name);
+                let reply = crate::suspend(&target)?;
+                Ok(vec![text(format!(
+                    "VM '{name}' suspended in {:.1} s ({:.1} GB saved state); its RAM is freed. Any tool that needs it resumes it automatically.",
+                    reply["seconds"].as_f64().unwrap_or(0.0),
+                    reply["state_bytes"].as_u64().unwrap_or(0) as f64 / 1e9
+                ))])
+            }
             "vm_down" => self.vm_down(args),
             _ => bail!("Unknown tool: {name}"),
         }
@@ -336,14 +354,18 @@ impl Server {
         Ok(name)
     }
 
-    fn target(&self, args: &Value) -> Result<Target> {
+    fn target(&mut self, args: &Value) -> Result<Target> {
         let name = self.vm_name(args, "vm")?;
         if !paths::vm(&name).join("config.json").exists() {
             bail!("No VM named '{name}'. Call vm_up with {{\"name\": \"{name}\"}} to create and boot it.");
         }
         let target = Target::resolve(&name)?;
-        if host::status(&name)?["state"] != "running" {
+        let reply = crate::wake(&target)?;
+        if reply["vm"]["state"] != "running" {
             bail!("VM '{name}' is not running. Call vm_up with {{\"name\": \"{name}\"}} to boot it.");
+        }
+        if reply["resumed"] == true {
+            self.notes.push(format!("VM '{name}' was suspended and has been resumed from its saved state ({:.1} s).", reply["seconds"].as_f64().unwrap_or(0.0)));
         }
         Ok(target)
     }
@@ -597,12 +619,18 @@ impl Server {
         let mode = ShareMode::from_str(&mode, true).map_err(|_| anyhow!("unknown workspace_mode '{mode}'; use clone, rw, ro or none"))?;
         let view = boolean(args, "view")?;
         let timeout = int(args, "timeout_seconds", 1, 600, 50)?;
+        let idle_suspend = match number(args, "idle_suspend_minutes")? {
+            None => None,
+            Some(_) => Some(int(args, "idle_suspend_minutes", 0, 10080, 0)?),
+        };
+        let fresh = boolean(args, "fresh")?;
         let existed = paths::vm(&name).join("config.json").exists();
-        let started = crate::start_vm(&name, &image, None, mode, None, None, view);
+        let options = crate::Boot { cpus: None, memory_gb: None, view, fresh, idle_suspend };
+        let started = crate::start_vm(&name, &image, None, mode, options);
         if !existed && paths::vm(&name).join("config.json").exists() {
             self.created.insert(name.clone());
         }
-        let (target, spec) = match started {
+        let (target, spec, reply) = match started {
             Ok(started) => started,
             Err(err) => {
                 let running = crate::vm_rows().unwrap_or_default().iter().filter(|r| r["state"] != "stopped").count();
@@ -613,6 +641,9 @@ impl Server {
             }
         };
         self.default_vm = Some(name.clone());
+        if reply["resumed"] == true {
+            self.notes.push(format!("Resumed VM '{name}' from its saved state in {:.1} s.", reply["seconds"].as_f64().unwrap_or(0.0)));
+        }
         let deadline = Instant::now() + Duration::from_secs(timeout);
         let ready = machine::wait_for_ip(&spec, deadline).and_then(|ip| machine::wait_for_ssh(&spec, &ip, deadline).map(|_| ip));
         match ready {
@@ -900,15 +931,20 @@ fn tools() -> Vec<Value> {
         tool("type_password", "Type password", "Type the VM user's password into the focused field (login window, sudo or authorization dialog) without revealing it. Click the password field first. Never ask the user for the password.", json!({"press_enter": {"type": "boolean", "default": false, "description": "Press Return after typing"}}), &[], true),
         tool("wait_for_control", "Wait for control", "Wait until a human who took over the VM hands control back to you. Returns early when you have control; take a screenshot afterwards.", json!({"timeout_seconds": seconds(3600)}), &[], true),
         tool("vm_view", "Show VM to user", "Show the VM in a window on the user's Mac. Use it when you need the user to look at or do something in the VM (e.g. sign in), then call wait_for_control.", json!({}), &[], true),
-        tool("vm_list", "List VMs", "List the Shovel VMs with their state, controller and IP, and which one is the default.", json!({}), &[], false),
-        tool("vm_up", "Start VM", "Create (if new) and boot a macOS VM cloned from a golden image, wait until it is ready, and make it the default VM for the other tools. If it returns \"still booting\", call it again with the same name.", json!({
+        tool("vm_list", "List VMs", "List the Shovel VMs with their state (running, suspended with state_bytes, stopped), controller and IP, and which one is the default.", json!({}), &[], false),
+        tool("vm_up", "Start VM", "Create (if new) and boot a macOS VM cloned from a golden image, or resume it if it is suspended, wait until it is ready, and make it the default VM for the other tools. If it returns \"still booting\", call it again with the same name.", json!({
             "name": {"type": "string", "description": "VM name (letters, digits, '-', '_'), e.g. \"agent-1\"; optional if a default VM is bound"},
             "image": {"type": "string", "default": "base", "description": "golden image to clone"},
             "workspace_mode": {"type": "string", "enum": ["clone", "rw", "ro", "none"], "default": "clone", "description": "clone = private copy-on-write copy of the host ~/workspace at ~/workspace in the guest; rw/ro = live mount; none = no workspace"},
             "view": {"type": "boolean", "default": false, "description": "Also open a live view window on the user's Mac"},
             "timeout_seconds": {"type": "integer", "minimum": 1, "maximum": 600, "default": 50, "description": "Seconds to wait for the VM to be ready"},
+            "idle_suspend_minutes": {"type": "integer", "minimum": 0, "maximum": 10080, "description": "Suspend the VM automatically after this many idle minutes (no tool calls, no SSH, low CPU, nobody watching); 0 turns it off. Saved with the VM."},
+            "fresh": {"type": "boolean", "default": false, "description": "Discard a suspended VM's saved state and cold boot instead of resuming"},
         }), &[], false),
-        tool("vm_down", "Stop VM", "Shut a VM down; with remove=true also delete it (only VMs created by vm_up in this session).", json!({
+        tool("vm_suspend", "Suspend VM", "Save the VM's exact state (apps, windows, unsaved work, running processes) to disk and stop it, freeing its RAM on the user's Mac. Takes a few seconds. Any tool that needs the VM, or vm_up, resumes it where it left off.", json!({
+            "name": {"type": "string", "description": "VM name; defaults to the default VM"},
+        }), &[], false),
+        tool("vm_down", "Stop VM", "Shut a VM down (a suspended VM's saved state is discarded); with remove=true also delete it (only VMs created by vm_up in this session).", json!({
             "name": {"type": "string", "description": "VM name; defaults to the default VM"},
             "remove": {"type": "boolean", "default": false, "description": "also delete the VM; only allowed for VMs created by vm_up in this session"},
         }), &[], false),
@@ -986,7 +1022,7 @@ mod tests {
     #[test]
     fn tool_list() {
         let list = tools();
-        assert_eq!(list.len(), 25);
+        assert_eq!(list.len(), 26);
         for t in &list {
             assert_eq!(t["inputSchema"]["type"], "object");
         }

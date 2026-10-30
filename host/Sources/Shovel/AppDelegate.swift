@@ -6,6 +6,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     var statusItem: NSStatusItem?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        signal(SIGPIPE, SIG_IGN)
         do {
             try FileManager.default.createDirectory(at: Paths.root, withIntermediateDirectories: true)
             let server = SocketServer(path: Paths.socket.path) { [manager] request, reply in
@@ -49,9 +50,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             menu.addItem(withTitle: "Installing \(job.id): \(job.phase) \(Int(job.progress * 100))%", action: nil, keyEquivalent: "")
         }
         menu.addItem(.separator())
-        let quit = NSMenuItem(title: "Quit Shovel (stops all VMs)", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
+        let quit = NSMenuItem(title: "Quit Shovel (suspends running VMs)", action: #selector(quit(_:)), keyEquivalent: "q")
+        quit.target = self
         menu.addItem(quit)
         statusItem?.menu = menu
+    }
+
+    @objc func quit(_ sender: NSMenuItem) {
+        manager.suspendAll { NSApp.terminate(nil) }
     }
 
     @objc func openViewer(_ sender: NSMenuItem) {

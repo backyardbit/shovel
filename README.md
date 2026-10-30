@@ -51,8 +51,20 @@ shovel key t1 cmd+space
 shovel password type t1 --enter       # types the guest password into the focused field
 shovel view t1                        # live window; "Take Over" pauses agent input
 shovel takeover t1 / shovel release t1
+shovel suspend t1                     # save state to disk, free the VM's RAM
+shovel up t1                          # resume exactly where it was (--fresh: discard state, cold boot)
 shovel down t1 --rm
 ```
+
+### Suspend and resume
+
+A running VM pins its full RAM (8 GB by default) on the host. `shovel suspend <name>` saves the VM's exact state (open apps, unsaved documents, running processes) to `~/.shovel/vms/<name>/state.vzvmsave` and stops it, which gives that RAM back; it takes about 4 s and writes a file roughly the size of the RAM the guest has touched (2.5–3 GB for a lightly used VM). `shovel up <name>` resumes it in about 4 s with the same IP, and any command that needs a running VM (`exec`, `ssh`, `cp`, `screenshot`, `click`/`type`/`key`/..., `record`, `view`, `password type`, every MCP tool) resumes it automatically first. `shovel ls` and `status` show `suspended` and the state file size.
+
+The saved state belongs to the disk as it was at suspend time, so it is consumed on resume and never kept beside a running VM. `shovel up --fresh` discards it and cold boots; `shovel down` on a suspended VM discards it too (the VM becomes stopped, as if it had shut down); `down --rm` and `rm` delete everything. If a resume fails (for example after the VM's CPU or memory settings changed), the state file is kept and the error suggests `--fresh`.
+
+`shovel up <name> --idle-suspend <minutes>` (saved in the VM's config; `0` turns it off) suspends the VM after it has been idle that long: no Shovel commands for it, no SSH session or VNC connection from the host (so a long `exec` or a recording keeps it awake), its viewer closed and not under human control, and the VM process below a quarter of a CPU core (an idle macOS guest uses about 5%). Quitting Shovel (`shovel host stop` or the menu) suspends running VMs instead of killing them.
+
+macOS encrypts saved state with a Secure Enclave key it only creates while the Mac is unlocked, so suspending fails while the screen is locked; the VM keeps running and the error says so.
 
 ## Computer use over MCP (any agent)
 
@@ -83,7 +95,7 @@ Claude Desktop, Cursor (`.cursor/mcp.json`) and SDK clients use the usual `mcpSe
 
 GUI apps don't inherit your shell `PATH`, so use the absolute path from `which shovel`.
 
-Tools: `screenshot`, `zoom`, `left_click`, `right_click`, `middle_click`, `double_click`, `triple_click`, `mouse_move`, `left_click_drag`, `left_mouse_down`, `left_mouse_up`, `scroll`, `type`, `key`, `hold_key`, `cursor_position`, `wait`, `exec`, `open_application`, `type_password`, `wait_for_control`, `vm_view`, `vm_list`, `vm_up`, `vm_down`. Screenshots come back inline as PNG images of at most 1280x800 (`--max-width`/`--max-height`), and the coordinates the agent reads off a screenshot are the ones it clicks; the server maps them to the VM display. `vm_down` only deletes VMs that the same server created.
+Tools: `screenshot`, `zoom`, `left_click`, `right_click`, `middle_click`, `double_click`, `triple_click`, `mouse_move`, `left_click_drag`, `left_mouse_down`, `left_mouse_up`, `scroll`, `type`, `key`, `hold_key`, `cursor_position`, `wait`, `exec`, `open_application`, `type_password`, `wait_for_control`, `vm_view`, `vm_list`, `vm_up`, `vm_suspend`, `vm_down`. Screenshots come back inline as PNG images of at most 1280x800 (`--max-width`/`--max-height`), and the coordinates the agent reads off a screenshot are the ones it clicks; the server maps them to the VM display. `vm_down` only deletes VMs that the same server created. `vm_suspend` frees a VM's RAM; the next tool call that needs it resumes it and says so in its output, and `vm_up` takes `idle_suspend_minutes`.
 
 Codex: some Codex builds list MCP tools through a tool search instead of the model's tool list, so a model can miss them. Naming them in the prompt ("using the shovel MCP tools, ...") makes it look them up.
 

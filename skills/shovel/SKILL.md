@@ -13,6 +13,8 @@ description: Shovel macOS VMs — use when a task needs a throwaway Mac to insta
 2. Do the work: `exec` for anything scriptable, GUI commands only for what needs the screen.
 3. `shovel down <name> --rm` when finished. The done state: `shovel ls` no longer lists your VM.
 
+To pause for a while but keep everything as it is, `shovel suspend <name>`: it saves the VM's state to disk (about 4 s) and frees its RAM. Any later command on that VM (or `up`) resumes it exactly where it was, so you never need to resume it yourself. `up --fresh` discards the saved state and cold boots; `down` on a suspended VM discards it too. `up <name> --idle-suspend <minutes>` makes the host do this when the VM sits idle.
+
 ## The guest
 
 - Full network access. Same username as the host, passwordless `sudo`.
