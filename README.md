@@ -56,6 +56,15 @@ Workspace modes for `up`: `--share-mode clone` (default, private CoW snapshot), 
 
 While a human has control, GUI commands exit with code 3; agents wait with `shovel wait-control <name>`.
 
+## Building Shovel with Shovel
+
+```sh
+scripts/selfbuild.sh            # build + test the committed sources in a clean VM
+scripts/selfbuild.sh --ref main --keep
+```
+
+The VM compiles the CLI, runs the tests, bundles and signs Shovel.app, and smoke-tests the video encoder. It cannot boot VMs itself: Apple Silicon doesn't support nested virtualization for macOS guests.
+
 ## Layout
 
 ```
