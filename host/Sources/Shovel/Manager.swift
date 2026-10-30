@@ -242,10 +242,12 @@ final class Manager {
             vm.viewer = viewer
         }
         NSApp.setActivationPolicy(.regular)
-        vm.viewer?.showWindow(nil)
-        vm.viewer?.window?.makeKeyAndOrderFront(nil)
-        NSApp.activate(ignoringOtherApps: true)
-        onChange?()
+        DispatchQueue.main.async {
+            NSApp.activate()
+            vm.viewer?.showWindow(nil)
+            vm.viewer?.window?.makeKeyAndOrderFront(nil)
+            self.onChange?()
+        }
     }
 
     func updateActivationPolicy() {
