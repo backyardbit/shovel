@@ -775,9 +775,21 @@ fn remove_vm(name: &str) -> Result<()> {
         bail!("use `shovel image rm` to delete images");
     }
     let dir = paths::vm(name);
-    if dir.exists() {
-        std::fs::remove_dir_all(&dir).with_context(|| format!("removing {}", dir.display()))?;
+    if !dir.exists() {
+        return Ok(());
     }
+    let trash = paths::root().join("trash");
+    std::fs::create_dir_all(&trash)?;
+    let doomed = trash.join(format!("{name}-{}", record::now_ms()));
+    std::fs::rename(&dir, &doomed).with_context(|| format!("removing {}", dir.display()))?;
+    std::process::Command::new("rm")
+        .arg("-rf")
+        .arg(&doomed)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .process_group(0)
+        .spawn()?;
     Ok(())
 }
 
