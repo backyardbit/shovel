@@ -78,7 +78,7 @@ default_tools_approval_mode = "approve"   # otherwise every click needs approval
 Claude Desktop, Cursor (`.cursor/mcp.json`) and SDK clients use the usual `mcpServers` block:
 
 ```json
-{"mcpServers": {"shovel": {"command": "/usr/local/bin/shovel", "args": ["mcp"], "env": {"SHOVEL_VM": "t1"}}}}
+{"mcpServers": {"shovel": {"command": "/Users/you/.cargo/bin/shovel", "args": ["mcp"], "env": {"SHOVEL_VM": "t1"}}}}
 ```
 
 GUI apps don't inherit your shell `PATH`, so use the absolute path from `which shovel`.

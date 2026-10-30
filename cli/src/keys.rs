@@ -60,28 +60,49 @@ fn char_keysym(c: char) -> (u32, bool) {
     }
 }
 
+fn punctuation(name: &str) -> Option<char> {
+    let c = match name {
+        "plus" => '+',
+        "minus" => '-',
+        "equal" | "equals" => '=',
+        "comma" => ',',
+        "period" => '.',
+        "slash" => '/',
+        "backslash" => '\\',
+        "semicolon" => ';',
+        "apostrophe" => '\'',
+        "grave" => '`',
+        "bracketleft" => '[',
+        "bracketright" => ']',
+        _ => return None,
+    };
+    Some(c)
+}
+
 fn normalize(token: &str) -> String {
     if token.chars().count() > 1 {
-        token.chars().filter(|c| !matches!(c, '_' | '-' | ' ')).collect()
+        let lower = token.to_lowercase();
+        let base = lower.strip_suffix("_l").or_else(|| lower.strip_suffix("_r")).unwrap_or(&lower);
+        base.chars().filter(|c| !matches!(c, '_' | '-' | ' ')).collect()
     } else {
         token.to_string()
     }
 }
 
 pub fn parse_combo(combo: &str) -> Result<(Vec<u32>, u32)> {
-    let lower = combo.to_lowercase();
-    let parts: Vec<String> = if lower == "+" {
+    let parts: Vec<String> = if combo == "+" {
         vec!["+".into()]
-    } else if let Some(mods) = lower.strip_suffix("++") {
+    } else if let Some(mods) = combo.strip_suffix("++") {
         mods.split('+').map(normalize).chain(["+".to_string()]).collect()
     } else {
-        lower.split('+').map(normalize).collect()
+        combo.split('+').map(normalize).collect()
     };
     let (key, mods) = parts.split_last().unwrap();
+    let key = punctuation(key).map_or_else(|| key.clone(), String::from);
     let key = key.as_str();
     let mut modifiers = Vec::new();
     for m in mods {
-        match modifier(m) {
+        match modifier(&m.to_lowercase()) {
             Some(sym) => modifiers.push(sym),
             None => bail!("unknown modifier '{m}' in '{combo}'"),
         }
@@ -93,7 +114,14 @@ pub fn parse_combo(combo: &str) -> Result<(Vec<u32>, u32)> {
     } else {
         let mut chars = key.chars();
         match (chars.next(), chars.next()) {
-            (Some(c), None) => char_keysym(c).0,
+            (Some(c), None) => {
+                let c = if modifiers.iter().all(|&m| m == SHIFT) { c } else { c.to_ascii_lowercase() };
+                let (sym, shift) = char_keysym(c);
+                if shift && !modifiers.contains(&SHIFT) {
+                    modifiers.push(SHIFT);
+                }
+                sym
+            }
             _ => bail!("unknown key '{key}' in '{combo}'"),
         }
     };

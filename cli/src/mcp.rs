@@ -396,7 +396,7 @@ impl Server {
         let mut vnc = crate::connect_vnc(&target, true)?;
         let (w, h, rgb) = vnc.capture()?;
         let geo = Geo::new(w, h, self.max);
-        let small = downscale(w, h, &rgb, geo.sw, geo.sh);
+        let small = resize(w, h, &rgb, geo.sw, geo.sh);
         let png = vnc::encode_png(geo.sw, geo.sh, &small, png::Compression::Default)?;
         let pointer = match self.pointer.get(&target.id) {
             Some(&(nx, ny)) => {
@@ -436,12 +436,12 @@ impl Server {
             let start = ((y * w + nx0 as u32) * 3) as usize;
             crop.extend_from_slice(&rgb[start..start + cw as usize * 3]);
         }
-        let fit = Geo::new(cw, ch, self.max);
-        let image = downscale(cw, ch, &crop, fit.sw, fit.sh);
-        let png = vnc::encode_png(fit.sw, fit.sh, &image, png::Compression::Default)?;
-        let shown = if (fit.sw, fit.sh) != (cw, ch) { format!(", shown at {}x{}", fit.sw, fit.sh) } else { String::new() };
+        let scale = (self.max.0 as f64 / cw as f64).min(self.max.1 as f64 / ch as f64);
+        let (zw, zh) = (((cw as f64 * scale).round() as u32).max(1), ((ch as f64 * scale).round() as u32).max(1));
+        let image = resize(cw, ch, &crop, zw, zh);
+        let png = vnc::encode_png(zw, zh, &image, png::Compression::Default)?;
         let note = format!(
-            "Zoom of screenshot region [{x0},{y0},{x1},{y1}] at {cw}x{ch} (native pixels{shown}). Coordinates inside this image are NOT click coordinates; keep using full-screenshot coordinates."
+            "Zoom of screenshot region [{x0},{y0},{x1},{y1}]: {cw}x{ch} VM display pixels shown at {zw}x{zh} ({scale:.2}x). Coordinates inside this image are NOT click coordinates; keep using full-screenshot coordinates."
         );
         Ok(vec![json!({"type": "image", "data": base64(&png), "mimeType": "image/png"}), text(note)])
     }
@@ -598,7 +598,11 @@ impl Server {
         let view = boolean(args, "view")?;
         let timeout = int(args, "timeout_seconds", 1, 600, 50)?;
         let existed = paths::vm(&name).join("config.json").exists();
-        let (target, spec) = match crate::start_vm(&name, &image, None, mode, None, None, view) {
+        let started = crate::start_vm(&name, &image, None, mode, None, None, view);
+        if !existed && paths::vm(&name).join("config.json").exists() {
+            self.created.insert(name.clone());
+        }
+        let (target, spec) = match started {
             Ok(started) => started,
             Err(err) => {
                 let running = crate::vm_rows().unwrap_or_default().iter().filter(|r| r["state"] != "stopped").count();
@@ -608,9 +612,6 @@ impl Server {
                 return Err(err);
             }
         };
-        if !existed {
-            self.created.insert(name.clone());
-        }
         self.default_vm = Some(name.clone());
         let deadline = Instant::now() + Duration::from_secs(timeout);
         let ready = machine::wait_for_ip(&spec, deadline).and_then(|ip| machine::wait_for_ssh(&spec, &ip, deadline).map(|_| ip));
@@ -641,7 +642,7 @@ impl Server {
         }
         let target = Target::resolve(&name)?;
         self.release_held(&name);
-        crate::down(&target, remove)?;
+        crate::down(&target, false)?;
         self.pointer.remove(&name);
         if remove {
             crate::remove_vm(&name)?;
@@ -682,7 +683,7 @@ impl Geo {
     }
 }
 
-fn downscale(w: u32, h: u32, rgb: &[u8], dw: u32, dh: u32) -> Vec<u8> {
+fn resize(w: u32, h: u32, rgb: &[u8], dw: u32, dh: u32) -> Vec<u8> {
     if (dw, dh) == (w, h) {
         return rgb.to_vec();
     }
@@ -890,7 +891,7 @@ fn tools() -> Vec<Value> {
         tool("left_mouse_up", "Left button up", "Release the left button at the current pointer.", json!({}), &[], true),
         tool("scroll", "Scroll", "Scroll with the mouse wheel at a point (the pointer moves there first), scrolling whatever view is under it. One tick is one wheel notch, roughly 10 lines of text; take a screenshot to see where it landed.", json!({"coordinate": coord, "scroll_direction": {"type": "string", "enum": ["up", "down", "left", "right"]}, "scroll_amount": {"type": "integer", "minimum": 1, "maximum": 50, "default": 3, "description": "Wheel ticks (notches)"}, "modifiers": mods}), &["coordinate", "scroll_direction"], true),
         tool("type", "Type text", "Type text with the keyboard into the focused element.", json!({"text": {"type": "string", "description": "Text to type literally into the focused element. \\n presses Return, \\t presses Tab. For shortcuts use key. Non-ASCII characters (é, ✓, emoji) are pasted through the VM clipboard."}}), &["text"], true),
-        tool("key", "Press keys", "Press a key or key combination (shortcut), or a sequence of them.", json!({"keys": {"type": "string", "description": "One key or chord, or several separated by spaces to press in order, e.g. \"cmd+a\", \"return\", \"cmd+space\", \"escape tab tab return\". Keys: return, tab, escape, backspace (Mac delete), forwarddelete, space, up, down, left, right, home, end, pageup, pagedown, f1-f20, or one character. Modifiers: cmd, shift, ctrl, option."}, "repeat": {"type": "integer", "minimum": 1, "maximum": 100, "default": 1, "description": "How many times to press the whole sequence"}}), &["keys"], true),
+        tool("key", "Press keys", "Press a key or key combination (shortcut), or a sequence of them.", json!({"keys": {"type": "string", "description": "One key or chord, or several separated by spaces to press in order, e.g. \"cmd+a\", \"return\", \"cmd+space\", \"escape tab tab return\". Keys: return, tab, escape, backspace (also \"delete\": deletes left, like the Mac delete key), forwarddelete (deletes right), space, up, down, left, right, home, end, pageup, pagedown, f1-f20, plus, minus, or one character (\"A\", \"?\" and \"@\" add shift automatically). Modifiers: cmd, shift, ctrl, option (aliases: super, meta, alt, control, *_l/*_r)."}, "repeat": {"type": "integer", "minimum": 1, "maximum": 100, "default": 1, "description": "How many times to press the whole sequence"}}), &["keys"], true),
         tool("hold_key", "Hold key", "Hold a key or chord down for a duration, then release it.", json!({"keys": {"type": "string", "description": "One key or chord, e.g. \"shift\" or \"cmd+tab\""}, "duration_seconds": {"type": "number", "minimum": 0, "maximum": 10}}), &["keys", "duration_seconds"], true),
         tool("cursor_position", "Cursor position", "Report the pointer position in screenshot pixels. This is the last position set by this server's mouse tools; the VM does not report moves made by a human.", json!({}), &[], true),
         tool("wait", "Wait", "Wait for a number of seconds, e.g. for an app to launch or a page to load, then take a screenshot.", json!({"duration_seconds": {"type": "number", "minimum": 0, "maximum": 60}}), &["duration_seconds"], false),
@@ -940,7 +941,8 @@ mod tests {
     #[test]
     fn box_filter() {
         let rgb = vec![0, 0, 0, 255, 255, 255, 100, 100, 100, 100, 100, 100];
-        assert_eq!(downscale(2, 2, &rgb, 1, 1), vec![114, 114, 114]);
+        assert_eq!(resize(2, 2, &rgb, 1, 1), vec![114, 114, 114]);
+        assert_eq!(resize(1, 1, &[1, 2, 3], 2, 2), [1, 2, 3].repeat(4));
     }
 
     #[test]
@@ -957,9 +959,18 @@ mod tests {
         assert_eq!(keys::parse_combo("BackSpace").unwrap().1, 0xff08);
         assert_eq!(keys::parse_combo("KP_Enter").unwrap().1, 0xff0d);
         assert_eq!(keys::parse_combo("cmd+shift+a").unwrap(), (vec![0xffe9, 0xffe1], 'a' as u32));
-        assert_eq!(keys::parse_combo("+").unwrap().1, '+' as u32);
+        assert_eq!(keys::parse_combo("+").unwrap(), (vec![0xffe1], '+' as u32));
         assert_eq!(keys::parse_combo("ctrl+-").unwrap(), (vec![0xffe3], '-' as u32));
-        assert_eq!(keys::parse_combo("cmd++").unwrap(), (vec![0xffe9], '+' as u32));
+        assert_eq!(keys::parse_combo("cmd++").unwrap(), (vec![0xffe9, 0xffe1], '+' as u32));
+        assert_eq!(keys::parse_combo("cmd+plus").unwrap(), (vec![0xffe9, 0xffe1], '+' as u32));
+        assert_eq!(keys::parse_combo("ctrl+minus").unwrap(), (vec![0xffe3], '-' as u32));
+        assert_eq!(keys::parse_combo("?").unwrap(), (vec![0xffe1], '?' as u32));
+        assert_eq!(keys::parse_combo("shift+?").unwrap(), (vec![0xffe1], '?' as u32));
+        assert_eq!(keys::parse_combo("A").unwrap(), (vec![0xffe1], 'A' as u32));
+        assert_eq!(keys::parse_combo("a").unwrap(), (vec![], 'a' as u32));
+        assert_eq!(keys::parse_combo("ctrl+C").unwrap(), (vec![0xffe3], 'c' as u32));
+        assert_eq!(keys::parse_combo("Super_L").unwrap().1, 0xffe9);
+        assert_eq!(keys::parse_combo("Control_L+Shift_R+Tab").unwrap(), (vec![0xffe3, 0xffe1], 0xff09));
         assert!(keys::parse_modifiers("cmd+hyper").is_err());
         assert_eq!(keys::parse_modifiers(" cmd + Shift ").unwrap(), vec![0xffe9, 0xffe1]);
     }
