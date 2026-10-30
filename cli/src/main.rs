@@ -2,6 +2,7 @@ mod github;
 mod host;
 mod keys;
 mod machine;
+mod mcp;
 mod password;
 mod paths;
 mod record;
@@ -191,6 +192,15 @@ enum Cmd {
     Password {
         #[command(subcommand)]
         command: PasswordCmd,
+    },
+    #[command(about = "Serve MCP on stdio: computer-use tools for VMs, e.g. `claude mcp add shovel -- shovel mcp --vm t1`")]
+    Mcp {
+        #[arg(long, help = "Default VM for tools called without `vm` [env: SHOVEL_VM]")]
+        vm: Option<String>,
+        #[arg(long, default_value_t = 1280, help = "Max screenshot width sent to the model")]
+        max_width: u32,
+        #[arg(long, default_value_t = 800, help = "Max screenshot height sent to the model")]
+        max_height: u32,
     },
     #[command(about = "Control the Shovel host app")]
     Host {
@@ -543,6 +553,9 @@ fn run(cli: Cli) -> Result<()> {
                 }
             });
             Ok(())
+        }
+        Cmd::Mcp { vm, max_width, max_height } => {
+            mcp::serve(vm.or_else(|| std::env::var("SHOVEL_VM").ok()).filter(|s| !s.is_empty()), max_width, max_height)
         }
         Cmd::Host { command } => match command {
             HostCmd::Start => {
