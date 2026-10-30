@@ -3,6 +3,8 @@ name = "shovel"
 version = "0.1.0"
 edition = "2021"
 description = "Disposable macOS VMs for agents"
+license = "MIT"
+repository = "https://github.com/backyardbit/shovel"
 
 [[bin]]
 name = "shovel"

@@ -65,3 +65,7 @@ skills/ Claude Code skill for agents
 ```
 
 State lives in `~/.shovel` (`images/`, `vms/`, `ipsw/`, `keys/`, `host.sock`); override with `SHOVEL_HOME`.
+
+## License
+
+MIT. See [LICENSE](LICENSE).
