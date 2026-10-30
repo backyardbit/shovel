@@ -232,12 +232,7 @@ impl Vnc {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
         }
-        let file = std::fs::File::create(path)?;
-        let mut encoder = png::Encoder::new(std::io::BufWriter::new(file), w, h);
-        encoder.set_color(png::ColorType::Rgb);
-        encoder.set_depth(png::BitDepth::Eight);
-        encoder.set_compression(png::Compression::Fast);
-        encoder.write_header()?.write_image_data(&rgb)?;
+        std::fs::write(path, encode_png(w, h, &rgb, png::Compression::Fast)?)?;
         Ok((w, h))
     }
 
@@ -308,6 +303,16 @@ impl Vnc {
         pause(150);
         Ok(())
     }
+}
+
+pub fn encode_png(w: u32, h: u32, rgb: &[u8], compression: png::Compression) -> Result<Vec<u8>> {
+    let mut out = Vec::new();
+    let mut encoder = png::Encoder::new(&mut out, w, h);
+    encoder.set_color(png::ColorType::Rgb);
+    encoder.set_depth(png::BitDepth::Eight);
+    encoder.set_compression(compression);
+    encoder.write_header()?.write_image_data(rgb)?;
+    Ok(out)
 }
 
 pub fn pause(ms: u64) {

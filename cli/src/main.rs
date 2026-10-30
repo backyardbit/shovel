@@ -656,25 +656,7 @@ fn up(
     no_wait: bool,
     timeout: u64,
 ) -> Result<()> {
-    machine::validate_name(name)?;
-    machine::ensure_guest_files()?;
-    let dir = paths::vm(name);
-    if !dir.join("config.json").exists() {
-        create_vm(name, from, share, share_mode, cpus, memory_gb)?;
-    } else if cpus.is_some() || memory_gb.is_some() {
-        let mut spec = machine::load(&dir)?;
-        if let Some(c) = cpus {
-            spec.cpus = c;
-        }
-        if let Some(m) = memory_gb {
-            spec.memory_mb = m * 1024;
-        }
-        machine::save(&dir, &spec)?;
-    }
-    let target = Target::resolve(name)?;
-    let spec = target.spec()?;
-    host::request(json!({"cmd": "start", "id": name, "dir": dir, "view": view}))?;
-
+    let (target, spec) = start_vm(name, from, share, share_mode, cpus, memory_gb, view)?;
     let mut ip = None;
     if !no_wait {
         let deadline = Instant::now() + Duration::from_secs(timeout);
@@ -697,6 +679,36 @@ fn up(
         )
     });
     Ok(())
+}
+
+fn start_vm(
+    name: &str,
+    from: &str,
+    share: Option<PathBuf>,
+    share_mode: ShareMode,
+    cpus: Option<u32>,
+    memory_gb: Option<u64>,
+    view: bool,
+) -> Result<(Target, Spec)> {
+    machine::validate_name(name)?;
+    machine::ensure_guest_files()?;
+    let dir = paths::vm(name);
+    if !dir.join("config.json").exists() {
+        create_vm(name, from, share, share_mode, cpus, memory_gb)?;
+    } else if cpus.is_some() || memory_gb.is_some() {
+        let mut spec = machine::load(&dir)?;
+        if let Some(c) = cpus {
+            spec.cpus = c;
+        }
+        if let Some(m) = memory_gb {
+            spec.memory_mb = m * 1024;
+        }
+        machine::save(&dir, &spec)?;
+    }
+    let target = Target::resolve(name)?;
+    let spec = target.spec()?;
+    host::request(json!({"cmd": "start", "id": name, "dir": dir, "view": view}))?;
+    Ok((target, spec))
 }
 
 fn create_vm(
@@ -823,6 +835,28 @@ fn remove_vm(name: &str) -> Result<()> {
 }
 
 fn list(json: bool) -> Result<()> {
+    let rows = vm_rows()?;
+    emit(json, json!({"ok": true, "vms": rows}), || {
+        if rows.is_empty() {
+            return "No VMs. Create one with `shovel up <name>`.".into();
+        }
+        let mut out = format!("{:<20} {:<10} {:<8} {:<16} {}", "NAME", "STATE", "CONTROL", "IP", "WORKSPACE");
+        for r in &rows {
+            out.push_str(&format!(
+                "\n{:<20} {:<10} {:<8} {:<16} {}",
+                r["name"].as_str().unwrap_or(""),
+                r["state"].as_str().unwrap_or(""),
+                r["controller"].as_str().unwrap_or("-"),
+                r["ip"].as_str().unwrap_or("-"),
+                r["workspace_mode"].as_str().unwrap_or("-"),
+            ));
+        }
+        out
+    });
+    Ok(())
+}
+
+fn vm_rows() -> Result<Vec<Value>> {
     let mut rows = Vec::new();
     let live = host::request_if_running(json!({"cmd": "list"}))?;
     let live_vms: Vec<Value> = live
@@ -856,24 +890,7 @@ fn list(json: bool) -> Result<()> {
             rows.push(json!({"name": id, "state": vm["state"], "controller": vm["controller"], "ip": Value::Null}));
         }
     }
-    emit(json, json!({"ok": true, "vms": rows}), || {
-        if rows.is_empty() {
-            return "No VMs. Create one with `shovel up <name>`.".into();
-        }
-        let mut out = format!("{:<20} {:<10} {:<8} {:<16} {}", "NAME", "STATE", "CONTROL", "IP", "WORKSPACE");
-        for r in &rows {
-            out.push_str(&format!(
-                "\n{:<20} {:<10} {:<8} {:<16} {}",
-                r["name"].as_str().unwrap_or(""),
-                r["state"].as_str().unwrap_or(""),
-                r["controller"].as_str().unwrap_or("-"),
-                r["ip"].as_str().unwrap_or("-"),
-                r["workspace_mode"].as_str().unwrap_or("-"),
-            ));
-        }
-        out
-    });
-    Ok(())
+    Ok(rows)
 }
 
 fn split_remote(arg: &str) -> Option<(&str, &str)> {
