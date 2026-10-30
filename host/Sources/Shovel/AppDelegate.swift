@@ -19,7 +19,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
 
         let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
-        item.button?.image = NSImage(systemSymbolName: "macwindow.on.rectangle", accessibilityDescription: "Shovel")
+        item.button?.image = StatusIcon.shovel()
         statusItem = item
         manager.onChange = { [weak self] in self?.rebuildMenu() }
         rebuildMenu()

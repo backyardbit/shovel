@@ -11,8 +11,19 @@ Requires Apple Silicon and macOS 14+. Apple limits each Mac to 2 concurrent macO
 
 ## Install
 
+Download `Shovel-<version>.dmg` from [Releases](https://github.com/backyardbit/shovel/releases), drag `Shovel.app` to Applications, then:
+
+```sh
+xattr -dr com.apple.quarantine /Applications/Shovel.app   # the app is ad-hoc signed, not notarized
+sudo mkdir -p /usr/local/bin && sudo ln -sf /Applications/Shovel.app/Contents/Helpers/shovel /usr/local/bin/shovel
+cp -R /Volumes/Shovel*/skills/shovel ~/.claude/skills/    # teach Claude Code to use it
+```
+
+From source:
+
 ```sh
 make install        # builds Shovel.app -> ~/Applications, shovel -> ~/.cargo/bin
+make dmg            # builds build/Shovel-<version>.dmg
 cp -R skills/shovel ~/.claude/skills/   # teach Claude Code to use it
 ```
 

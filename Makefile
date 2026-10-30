@@ -1,4 +1,4 @@
-.PHONY: all cli host install clean
+.PHONY: all cli host install dmg clean
 
 all: cli host
 
@@ -14,6 +14,9 @@ install: all
 	rm -rf $(HOME)/Applications/Shovel.app
 	cp -R build/Shovel.app $(HOME)/Applications/Shovel.app
 	cargo install --path cli --root $(HOME)/.cargo --force
+
+dmg:
+	./scripts/package-dmg.sh
 
 clean:
 	rm -rf build cli/target host/.build
