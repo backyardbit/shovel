@@ -14,6 +14,7 @@ Requires Apple Silicon and macOS 14+. Apple limits each Mac to 2 concurrent macO
 With Homebrew:
 
 ```sh
+brew tap backyardbit/tap && brew trust backyardbit/tap
 brew install --cask backyardbit/tap/shovel   # Shovel.app -> /Applications, shovel on PATH
 cp -R "$(brew --prefix)"/Caskroom/shovel/*/skills/shovel ~/.claude/skills/   # teach Claude Code to use it
 ```
